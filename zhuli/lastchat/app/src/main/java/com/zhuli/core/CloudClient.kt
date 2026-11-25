@@ -302,7 +302,9 @@ object CloudClient {
     ): String {
         // T-B3：最后一道统一闸门。不管调用方怎么组包（现在或将来新加的），
         // 出网前整体再扫一遍请求体，避免"某条路径忘了过闸"这类历史问题复发。
-        val payload = lastGate(ctx, task, rawPayload)
+        val gate = lastGate(ctx, task, rawPayload)
+        val payload = gate.payload
+        val gateNote = gate.note
         var conn: HttpURLConnection? = null
         try {
             val c = open("${ep.base}/chat/completions", ep.key)
@@ -316,16 +318,16 @@ object CloudClient {
             val code = c.responseCode
             if (code != 200) {
                 val err = try { c.errorStream?.bufferedReader()?.readText()?.take(120) } catch (_: Throwable) { "" }
-                PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload, ok = false, note = "HTTP $code")
+                PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload, ok = false, note = joinNote(gateNote, "HTTP $code"))
                 throw IllegalStateException("HTTP $code ${err.orEmpty().take(60)}")
             }
             val resp = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload, ok = true, note = "tools")
+            PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload, ok = true, note = joinNote(gateNote, "tools"))
             return resp
         } catch (t: Throwable) {
             if (t.message?.startsWith("HTTP ") != true) {
                 PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload, ok = false,
-                    note = "失败：${t.javaClass.simpleName}")
+                    note = joinNote(gateNote, "失败：${t.javaClass.simpleName}"))
             }
             throw t
         } finally {
@@ -407,7 +409,9 @@ object CloudClient {
         rawPayload: String,
         parse: (String) -> String
     ): String {
-        val payload = lastGate(ctx, task, rawPayload)
+        val gate = lastGate(ctx, task, rawPayload)
+        val payload = gate.payload
+        val gateNote = gate.note
         val started = System.currentTimeMillis()
         var conn: HttpURLConnection? = null
         try {
@@ -423,20 +427,20 @@ object CloudClient {
             if (code != 200) {
                 val err = try { c.errorStream?.bufferedReader()?.readText()?.take(80) } catch (_: Throwable) { "" }
                 PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload,
-                    ok = false, note = "HTTP $code ${err.orEmpty()}".trim())
+                    ok = false, note = joinNote(gateNote, "HTTP $code ${err.orEmpty()}".trim()))
                 throw IllegalStateException("HTTP $code")
             }
             val resp = c.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             val out = parse(resp)
             PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload,
-                ok = true, note = "${System.currentTimeMillis() - started}ms")
+                ok = true, note = joinNote(gateNote, "${System.currentTimeMillis() - started}ms"))
             return out
         } catch (t: Throwable) {
             // 连不上/超时/解析炸了也要留痕：出网这件事「发生过」，不然排障时全是空白。
             // HTTP 非 200 的分支上面已经写过留档，这里跳过免得重复记两条。
             if (t.message?.startsWith("HTTP ") != true) {
                 PrivacyRouter.audit(ctx, task, ep.host, ep.model, payload, ok = false,
-                    note = "失败：${t.javaClass.simpleName}:${t.message?.take(40) ?: ""}")
+                    note = joinNote(gateNote, "失败：${t.javaClass.simpleName}:${t.message?.take(40) ?: ""}"))
             }
             throw t
         } finally {
@@ -493,20 +497,33 @@ object CloudClient {
      * 实现委托给 [OutgoingGate]：那份逻辑是纯 JVM 的，能被单测直接钉住
      * （嵌套 tool_calls 参数、多模态数组、cloud_log 与实发内容一致）。
      */
-    private fun lastGate(ctx: Context, task: PrivacyRouter.Task, payload: String): String {
+    private fun lastGate(ctx: Context, task: PrivacyRouter.Task, payload: String): GateResult {
         return try {
-            OutgoingGate.scrub(
+            val out = PrivacyPipeline.scrub(
                 payloadJson = payload,
-                hardRedLine = { text -> PrivacyRouter.hardRedLine(text) },
-                sensitiveReason = { text -> if (SensitiveGuard.isSensitive(text)) SensitiveGuard.reason(text) ?: "敏感内容" else null },
-                redact = { text -> SensitiveGuard.redact(text) },
-                // 这里只处理 /chat/completions 的 JSON 体：结构异常必须中止，
+                rules = PrivacyPipeline.Rules(
+                    hardRedLine = { PrivacyDecision.hardRedLine(it) },
+                    sensitiveReason = { SensitiveGuard.reason(it) },
+                    redact = { SensitiveGuard.redact(it) },
+                ),
+                // 这里只处理 JSON 聊天体：结构异常必须中止，
                 // 绝不能因为「解析不出来就原样发」让聊天请求绕过闸门。
-                requireMessages = true,
-            ).payload
-        } catch (e: OutgoingGate.Blocked) {
+                requireKnownShape = true,
+            )
+            GateResult(
+                payload = out.payload,
+                note = if (out.redactions.isEmpty()) "" else
+                    "出网前脱敏 ${out.redactions.size} 处（${out.shape.label}，扫描 ${out.scannedFields} 字段）",
+            )
+        } catch (e: PrivacyPipeline.Blocked) {
             PrivacyRouter.audit(ctx, task, "-", "-", e.where, ok = false, note = "最后闸门拦截：${e.reason}")
             throw PrivacyBlockedException("${e.where} 含${e.reason}，已中止")
         }
     }
+
+    /** 闸门留档说明 + 本次调用说明，拼成一条 note（空项自动省略）。 */
+    private fun joinNote(vararg parts: String): String =
+        parts.filter { it.isNotBlank() }.joinToString(" · ")
+
+    private data class GateResult(val payload: String, val note: String)
 }

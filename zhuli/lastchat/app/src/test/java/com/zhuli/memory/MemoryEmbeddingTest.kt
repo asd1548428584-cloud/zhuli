@@ -9,7 +9,7 @@ class MemoryEmbeddingTest {
 
     @Test fun `哈希向量已归一化`() = runBlocking {
         val p = HashEmbeddingProvider(256)
-        val v = p.embedOne("顺丰取件码 6825")
+        val v = p.embedOne("顺丰取件码 1234")
         assertEquals(256, v.size)
         var norm = 0.0
         for (f in v) norm += f * f

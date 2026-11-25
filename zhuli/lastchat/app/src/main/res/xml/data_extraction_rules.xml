@@ -1,15 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+  云备份 / 换机迁移排除规则（批次 A）。
+
+  当前 Manifest 已设 `android:allowBackup="false"`，本文件是**第二道保险**：
+  万一将来有人把 allowBackup 打开，默认行为会把整个 App 数据（inbox 短信/通知原文、
+  记忆库、账本、chat_log）传到云端或新设备。这里显式排除全部域，
+  只保留 App 自己的加密导出（设置 → 备份与恢复）作为唯一迁移通道。
+
+  另：`disableIfNoEncryptionCapabilities="true"` 要求云端备份必须端到端加密。
 -->
 <data-extraction-rules>
-  <cloud-backup>
-  </cloud-backup>
-  <!--
-  <device-transfer>
-      <include .../>
-      <exclude .../>
-  </device-transfer>
-  -->
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+    </device-transfer>
 </data-extraction-rules>

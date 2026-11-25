@@ -38,33 +38,20 @@ object PrivacyRouter {
      * 另：[AssistantPrefs.privacyMode] 设成 strict 时退化为"任何敏感都不出机"（第 9 步的原始口径）。
      */
     fun decide(ctx: Context, task: Task, text: String): Decision {
-        if (!AssistantPrefs.cloudReady(ctx)) return Decision(false, "没配云端 Key，只在本地说", text)
-        val base = AssistantPrefs.linkBaseUrl(ctx)
-        if (!CloudClient.isEndpointSafe(base)) {
-            return Decision(false, "云端地址不是 HTTPS，为安全起见不发（本机回环除外）", text)
-        }
-        val why = SensitiveGuard.reason(text)
-        if (why == null) return Decision(true, "", text, redacted = false)
-        if (why in HARD_RED_LINES) {
-            return Decision(false, "这句话里有$why，脱敏也不发，只在本地说", text)
-        }
-        if (AssistantPrefs.privacyMode(ctx) == "strict") {
-            return Decision(false, "这句话里有$why，按严格模式只在本地说", text)
-        }
-        return Decision(true, "", SensitiveGuard.redact(text), redacted = true)
+        val v = PrivacyDecision.decide(
+            cloudReady = AssistantPrefs.cloudReady(ctx),
+            endpointSafe = CloudClient.isEndpointSafe(AssistantPrefs.linkBaseUrl(ctx)),
+            strict = AssistantPrefs.privacyMode(ctx) == "strict",
+            text = text,
+        )
+        return Decision(v.allow, v.reason, v.text, v.redacted)
     }
-
-    /** 这几类不参与"脱敏上云"：证件号、卡号、凭证（验证码/密码/token）。 */
-    private val HARD_RED_LINES = setOf("证件号", "卡号", "凭证", "凭证链接")
 
     /**
      * 硬红线判定：只有"脱敏也不该发"的那几类才返回类型名，其余返回 null。
      * 供 [CloudClient] 的最后一道闸门使用（T-B3）—— 它只关心"该不该中止整轮"。
      */
-    fun hardRedLine(text: String): String? {
-        val why = SensitiveGuard.reason(text) ?: return null
-        return if (why in HARD_RED_LINES) why else null
-    }
+    fun hardRedLine(text: String): String? = PrivacyDecision.hardRedLine(text)
 
     /** 写一条出网留档（内容先脱敏，再截断）。 */
     fun audit(

@@ -422,7 +422,7 @@ private fun loadSelfCheck(context: android.content.Context): SelfCheckState {
     return SelfCheckState(
         snap = snap,
         items = items,
-        privacyRows = ZhuliSelfCheckData.privacyRows(health.cloudReady),
+        privacyRows = ZhuliSelfCheckData.privacyRows(),
         cloud = cloud,
         hasAccess = me.rerere.rikkahub.utils.PermissionChecker.hasNotificationListenerAccess(context),
         hasSms = context.checkSelfPermission(android.Manifest.permission.READ_SMS) ==

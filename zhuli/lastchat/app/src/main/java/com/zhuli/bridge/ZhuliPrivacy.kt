@@ -1,5 +1,7 @@
 package com.zhuli.bridge
 
+import com.zhuli.core.PrivacyDecision
+
 /**
  * 隐私路由判定核心（T-G2/B1 移植，来自 zhuli 旧壳 PrivacyRouter）。
  *
@@ -29,9 +31,6 @@ object ZhuliPrivacy {
 
     data class Decision(val allow: Boolean, val reason: String, val text: String = "", val redacted: Boolean = false)
 
-    /** 脱敏后仍有识别风险、绝不参与"脱敏上云"的类型。 */
-    private val HARD_RED_LINES = setOf("证件号", "卡号", "凭证", "凭证链接")
-
     private val defaultLoopback: (String) -> Boolean = { url ->
         Regex("^https?://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:\\d+)?(/|$)", RegexOption.IGNORE_CASE)
             .containsMatchIn(url)
@@ -50,23 +49,21 @@ object ZhuliPrivacy {
      * 2. 命中硬红线 → 拦（脱敏也不发）；
      * 3. strict 模式下任何敏感 → 拦；
      * 4. 其余敏感 → 脱敏后放行；非敏感 → 原样放行。
+     *
+     * 批次 A 起判定本身收敛到 [PrivacyDecision]，这里只做参数装配。
      */
     fun decide(config: Config, task: Task, text: String): Decision {
-        if (!config.cloudReady) return Decision(false, "没配云端 Key，只在本地说", text)
-        if (!isEndpointSafe(config.baseUrl, config.isLoopback)) {
-            return Decision(false, "云端地址不是 HTTPS，为安全起见不发（本机回环除外）", text)
-        }
-        val why = ZhuliSensitiveGuard.reason(text) ?: return Decision(true, "", text, redacted = false)
-        if (why in HARD_RED_LINES) return Decision(false, "这句话里有$why，脱敏也不发，只在本地说", text)
-        if (config.strict) return Decision(false, "这句话里有$why，按严格模式只在本地说", text)
-        return Decision(true, "", ZhuliSensitiveGuard.redact(text), redacted = true)
+        val v = PrivacyDecision.decide(
+            cloudReady = config.cloudReady,
+            endpointSafe = isEndpointSafe(config.baseUrl, config.isLoopback),
+            strict = config.strict,
+            text = text,
+        )
+        return Decision(v.allow, v.reason, v.text, v.redacted)
     }
 
     /** 硬红线判定：只有"脱敏也不该发"的类型才返回类型名。 */
-    fun hardRedLine(text: String): String? {
-        val why = ZhuliSensitiveGuard.reason(text) ?: return null
-        return if (why in HARD_RED_LINES) why else null
-    }
+    fun hardRedLine(text: String): String? = PrivacyDecision.hardRedLine(text)
 
     /** 自检样例（对齐旧壳 DEFAULT_SAMPLES）。 */
     val defaultSamples = listOf(

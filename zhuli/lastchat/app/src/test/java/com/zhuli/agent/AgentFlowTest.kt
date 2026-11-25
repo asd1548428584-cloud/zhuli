@@ -44,19 +44,19 @@ class AgentFlowTest {
         val seen = ArrayList<String>()
         val p = ScriptedProvider(
             resp("", listOf(call("c1", "search_memory", """{"query":"取件码"}"""))),
-            resp("查到了：取件码 6825"),
+            resp("查到了：取件码 1234"),
         )
         val loop = AgentLoop(
             router = ModelRouter(listOf(p)),
             tools = ToolRegistry(listOf(tool("search_memory", Risk.READ_ONLY, "read") { args ->
-                seen.add(args); ToolResult.ok("取件码 6825")
+                seen.add(args); ToolResult.ok("取件码 1234")
             })),
             store = InMemoryAgentStore(), policy = PolicyEngine(), clock = { 1_000L },
         )
 
         val outcome = loop.start("我的取件码是多少")
         assertTrue(outcome.toString(), outcome is RunOutcome.Completed)
-        assertEquals("查到了：取件码 6825", (outcome as RunOutcome.Completed).task.result)
+        assertEquals("查到了：取件码 1234", (outcome as RunOutcome.Completed).task.result)
         assertEquals(1, seen.size)
         assertTrue(seen[0].contains("取件码"))
 

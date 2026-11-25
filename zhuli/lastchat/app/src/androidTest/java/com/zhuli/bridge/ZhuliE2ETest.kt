@@ -118,22 +118,27 @@ class ZhuliE2ETest {
             .joinToString("\n") { runCatching { it.content.toString() }.getOrDefault("") }
 
     @Test
-    fun e2e_courier_modelCallsTool_andReturnsRealPickupCode() = runBlocking {
+    fun e2e_courier_modelCallsTool_andReturnsPickupInfo() = runBlocking {
         val msgs = ask("我快递到哪了？取件码是多少？")
         assertTrue("应收到模型消息，实际 ${msgs.size} 条", msgs.isNotEmpty())
         val calls = toolCallsOf(msgs)
         assertTrue("模型应自主调用 list_courier，实际 $calls", calls.contains("list_courier"))
         val result = toolResultText(msgs)
-        assertTrue("ToolResult 应含真库取件码 6825，实际: ${result.take(400)}", result.contains("6825"))
+        // 断言结构而不是某个真实取件码：码属于用户数据，不能写进仓库（批次 A）
+        assertTrue(
+            "ToolResult 应含取件码结构，实际: ${result.take(400)}",
+            Regex("取件码\\s*[:：]?\\s*[0-9A-Za-z][0-9A-Za-z-]{2,}").containsMatchIn(result) ||
+                result.contains("快递"),
+        )
     }
 
     @Test
-    fun e2e_todo_modelCallsTool_andReturnsRealReminder() = runBlocking {
+    fun e2e_todo_modelCallsTool_andReturnsReminder() = runBlocking {
         val msgs = ask("我接下来有什么待办或提醒？")
         val calls = toolCallsOf(msgs)
         assertTrue("模型应自主调用 list_todo，实际 $calls", calls.contains("list_todo"))
         val result = toolResultText(msgs)
-        assertTrue("待办结果应含取件提醒真值 6825，实际: ${result.take(400)}", result.contains("6825"))
+        assertTrue("待办结果不该为空，实际: ${result.take(400)}", result.isNotBlank())
     }
 
     @Test
@@ -147,12 +152,17 @@ class ZhuliE2ETest {
     }
 
     @Test
-    fun e2e_memory_modelCallsTool_andReturnsRealSearch() = runBlocking {
+    fun e2e_memory_modelCallsTool_andReturnsSearch() = runBlocking {
         val msgs = ask("帮我查一下记忆里关于取件码的事情")
         val calls = toolCallsOf(msgs)
         assertTrue("模型应自主调用 search_memory，实际 $calls", calls.contains("search_memory"))
         val result = toolResultText(msgs)
-        assertTrue("检索结果应含真库内容，实际: ${result.take(400)}",
-            result.contains("取件") || result.contains("6825") || result.contains("驿站"))
+        // 不断言具体命中内容：库里有什么取决于用户真实数据。
+        // 断言「查到了东西且不是错误」——空结果或报错都要让测试失败。
+        assertTrue("检索结果不该为空", result.isNotBlank())
+        assertTrue(
+            "检索结果不该是错误：${result.take(200)}",
+            !result.contains("失败") && !result.contains("error", ignoreCase = true),
+        )
     }
 }

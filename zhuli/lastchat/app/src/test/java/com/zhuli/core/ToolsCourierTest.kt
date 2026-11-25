@@ -30,12 +30,12 @@ class ToolsCourierTest {
     )
 
     @Test fun `无期限快递也算待取 不再错答没有`() {
-        val rows = listOf(row("取件码 6825，18-3-8221", deadlineAt = 0L))
+        val rows = listOf(row("取件码 1234，8-1-2233", deadlineAt = 0L))
         val (pending, signed) = Tools.pickCourierRows(rows, now)
         assertEquals(1, pending.size)
         assertTrue(signed.isEmpty())
         val ans = Tools.courierAnswer(pending, signed, now)
-        assertTrue(ans.contains("6825"))
+        assertTrue(ans.contains("1234"))
         assertFalse(ans.contains("没有待取"))
     }
 

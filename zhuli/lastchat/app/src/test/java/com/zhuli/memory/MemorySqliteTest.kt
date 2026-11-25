@@ -160,7 +160,7 @@ class MemorySqliteTest {
 
         repo.ingest(
             listOf(
-                FactDraft("顺丰", "取件码", "6825 丰巢柜 3 号", FactKind.EXPRESS, 0.95, "丰巢取件通知"),
+                FactDraft("顺丰", "取件码", "1234 丰巢柜 3 号", FactKind.EXPRESS, 0.95, "丰巢取件通知"),
                 FactDraft("我", "住址", "北京市朝阳区建国路 88 号", FactKind.ADDRESS, 0.9, "地址短信"),
             ),
             SourceType.INBOX, 7L, now,
@@ -176,10 +176,10 @@ class MemorySqliteTest {
 
         // 原词命中
         val byCode = repo.hybridSearch("取件码", HashEmbeddingProvider(), now + 1_000)
-        assertTrue(byCode.any { it.fact.value.contains("6825") })
+        assertTrue(byCode.any { it.fact.value.contains("1234") })
         // 不同措辞（词序不同、只记得片段）也要找得到 —— 这是向量的意义
         val byPhrase = repo.hybridSearch("丰巢柜子里的件", HashEmbeddingProvider(), now + 1_000)
-        assertTrue("换措辞没找回事实：$byPhrase", byPhrase.any { it.fact.value.contains("6825") })
+        assertTrue("换措辞没找回事实：$byPhrase", byPhrase.any { it.fact.value.contains("1234") })
     }
 
     @Test

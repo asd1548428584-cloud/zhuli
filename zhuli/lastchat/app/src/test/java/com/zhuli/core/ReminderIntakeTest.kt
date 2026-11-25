@@ -63,8 +63,8 @@ class CourierPolicyTest {
 
     @Test
     fun `有取件码才提级，依据写清是推定`() {
-        val b = CourierPolicy.basisOf("6825")
-        assertTrue(b != null && b.contains("取件码 6825"))
+        val b = CourierPolicy.basisOf("1234")
+        assertTrue(b != null && b.contains("取件码 1234"))
         assertTrue(b!!.contains("推定"))
     }
 
@@ -76,9 +76,9 @@ class CourierPolicyTest {
     }
 
     @Test
-    fun `真实取件短信能解析出码并提级`() {
-        // 真机 11-21 收到的原文（韵达 / 欢猫驿站）
-        val text = "【欢猫驿站】您的韵达快递包裹已到一矿9号楼西侧28号车库，请凭6825取件"
+    fun `取件短信能解析出码并提级`() {
+        // 合成样本：结构照着真实取件短信写，但站名/地址/号码全部虚构（批次 A 脱敏）
+        val text = "【示例驿站】您的快递包裹已到示例路 1 号驿站，请凭1234取件"
         val info = Express.parse(text)
         assertTrue(info != null)
         assertTrue(CourierPolicy.basisOf(info!!.code) != null)

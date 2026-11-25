@@ -82,7 +82,7 @@ object ZhuliIntentRouter {
             appendLine("📦 待取快递（近 14 天，共 ${pending.size} 件）：")
             preview.forEach { r ->
                 val note = r.note.replace(Regex("^快递[·•]\\s*"), "").trim()
-                // 取件码：优先抓「取件码 xxx」（支持 23-8-6719 这种带横杠的），否则退回 4-8 位纯数字
+                // 取件码：优先抓「取件码 xxx」（支持 8-1-2233 这种带横杠的），否则退回 4-8 位纯数字
                 val code = Regex("取件码[：: ]*([0-9A-Za-z][0-9A-Za-z-]{2,})").find(note)?.groupValues?.get(1)
                     ?: Regex("\\d{4,8}").find(note)?.value
                 append("· ").append(note.ifBlank { r.text.take(50) })

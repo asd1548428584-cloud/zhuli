@@ -21,8 +21,8 @@ class MemoryRankerTest {
     )
 
     @Test fun `精确命中得分高于片段匹配`() {
-        val exact = MemoryRanker.lexical(fact("6825"), "6825")
-        val partial = MemoryRanker.lexical(fact("68254321"), "6825")
+        val exact = MemoryRanker.lexical(fact("1234"), "1234")
+        val partial = MemoryRanker.lexical(fact("12344321"), "1234")
         assertTrue("exact=$exact partial=$partial", exact > partial)
     }
 
@@ -39,7 +39,7 @@ class MemoryRankerTest {
     }
 
     @Test fun `弱相关被门槛过滤 不拿凑数结果糊弄`() {
-        val hits = MemoryRanker.search(listOf(fact("6825")), "今天天气怎么样", now)
+        val hits = MemoryRanker.search(listOf(fact("1234")), "今天天气怎么样", now)
         assertTrue(hits.isEmpty())
     }
 
@@ -57,14 +57,14 @@ class MemoryRankerTest {
     }
 
     @Test fun `查询带类型意图时对应类型加权`() {
-        val express = MemoryRanker.score(fact("6825"), "我的快递", now)
+        val express = MemoryRanker.score(fact("1234"), "我的快递", now)
         val money = MemoryRanker.score(fact("¥88", pred = "金额", kind = FactKind.MONEY), "我的快递", now)
         assertTrue(express.score > money.score)
     }
 
     @Test fun `置信度不同的同值事实 原文明确者排前`() {
-        val high = MemoryRanker.score(fact("6825", conf = 0.95), "取件码", now)
-        val low = MemoryRanker.score(fact("6825", conf = 0.45), "取件码", now)
+        val high = MemoryRanker.score(fact("1234", conf = 0.95), "取件码", now)
+        val low = MemoryRanker.score(fact("1234", conf = 0.45), "取件码", now)
         assertTrue(high.score > low.score)
     }
 }

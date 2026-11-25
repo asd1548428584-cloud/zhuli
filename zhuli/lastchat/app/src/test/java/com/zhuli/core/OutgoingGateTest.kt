@@ -119,8 +119,10 @@ class OutgoingGateTest {
 
     @Test
     fun `聊天载荷结构异常时中止出网 不静默放行原文`() {
-        // 聊天请求（requireMessages=true）遇到结构异常必须拒绝，不能原样发出去绕过闸门
-        val bad = """{"model":"gpt","prompt":"身份证 110101199003071234"}"""
+        // 聊天请求（requireMessages=true）遇到结构异常必须拒绝，不能原样发出去绕过闸门。
+        // 注意不能用 `prompt` 当反例：legacy completions 是**已知结构**，
+        // 批次 A 起也会被正常扫描（见 PrivacyPipelineTest）。这里用真正的未知结构。
+        val bad = """{"model":"gpt","foo":{"secret":"身份证 110101199003071234"}}"""
         val e = runCatching {
             OutgoingGate.scrub(
                 payloadJson = bad,

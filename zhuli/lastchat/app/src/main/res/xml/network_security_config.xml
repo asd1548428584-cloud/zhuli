@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置（批次 A）。
+
+  背景：此前 Manifest 里是 `android:usesCleartextTraffic="true"` 且没有 networkSecurityConfig，
+  等于全应用允许明文 HTTP。对个人助理来说，短信/通知/账本一旦走明文，同一 Wi-Fi 下就能被截获；
+  而项目自己的隐私策略（CloudClient / PrivacyRouter）只允许 HTTPS 或本机回环 ——
+  系统层与应用层的规则此前是矛盾的，这里以更严格的一侧为准。
+
+  例外只留三个本机地址，供本地模型网关与 adb reverse 自测使用：
+  - 127.0.0.1 / localhost：本机；
+  - 10.0.2.2：Android 模拟器访问宿主机的固定别名（真机上无意义）。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

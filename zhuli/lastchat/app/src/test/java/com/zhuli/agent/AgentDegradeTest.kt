@@ -46,7 +46,7 @@ class AgentDegradeTest {
 
     private fun readTool(hit: MutableList<String>) = RegisteredTool(
         ToolSpec("search_memory", "查记忆"), Risk.READ_ONLY, "search",
-    ) { args -> hit.add(args); ToolResult.ok("取件码 6825") }
+    ) { args -> hit.add(args); ToolResult.ok("取件码 1234") }
 
     private fun loop(c: Fake, l: Fake, store: AgentStore = InMemoryAgentStore(), onEvent: (String) -> Unit = {}) =
         AgentLoop(
@@ -69,7 +69,7 @@ class AgentDegradeTest {
             ModelCapabilities("cloud", "big", ProviderKind.CLOUD, tools = true, tier = 2, leavesDevice = true),
             script = listOf(
                 ModelResponse("", listOf(ToolCall("c1", "search_memory", """{"query":"取件码"}""")), providerId = "cloud", modelId = "big"),
-                ModelResponse("取件码 6825", providerId = "cloud", modelId = "big"),
+                ModelResponse("取件码 1234", providerId = "cloud", modelId = "big"),
             ),
         )
         val l = local()
@@ -80,7 +80,7 @@ class AgentDegradeTest {
         )
         val out = loop.start("我的取件码是多少")
         assertTrue(out is RunOutcome.Completed)
-        assertEquals("取件码 6825", (out as RunOutcome.Completed).task.result)
+        assertEquals("取件码 1234", (out as RunOutcome.Completed).task.result)
         assertEquals("云端正常时不该调用本地模型", 0, l.requests.size)
         assertEquals(1, hit.size)
         assertEquals(2, c.requests.size)
@@ -147,7 +147,7 @@ class AgentDegradeTest {
                 throw ModelError(ModelError.Kind.NETWORK, "断网")
             }
         }
-        val l = local("根据已查到的结果：取件码是 6825（提醒功能这次没做成）")
+        val l = local("根据已查到的结果：取件码是 1234（提醒功能这次没做成）")
         val loop = AgentLoop(
             router = ModelRouter(listOf(flaky, l)),
             tools = ToolRegistry(listOf(readTool(calls))),
@@ -160,7 +160,7 @@ class AgentDegradeTest {
         // 已执行过的工具结果必须在上下文里（不能因为降级就丢掉已发生的事）
         assertTrue(
             "降级请求里丢了工具结果",
-            localReq.messages.any { it.role == Role.TOOL && it.content.contains("6825") },
+            localReq.messages.any { it.role == Role.TOOL && it.content.contains("1234") },
         )
         // 必须明确说明「哪些做完了、哪些没做」，而不是让本地模型自由发挥
         val notes = localReq.messages.filter { it.role == Role.SYSTEM }.joinToString("|") { it.content }

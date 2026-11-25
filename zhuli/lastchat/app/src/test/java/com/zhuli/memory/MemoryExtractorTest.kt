@@ -22,10 +22,10 @@ class MemoryExtractorTest {
     )
 
     @Test fun `取件码必须有标签 且认出驿站主体`() {
-        val drafts = MemoryExtractor.extract(rec("菜鸟驿站", "您的取件码：6825，地址北京市朝阳区"))
+        val drafts = MemoryExtractor.extract(rec("菜鸟驿站", "您的取件码：1234，地址北京市朝阳区"))
         val pickup = drafts.firstOrNull { it.predicate == "取件码" }
         assertNotNull(pickup)
-        assertEquals("6825", pickup!!.value)
+        assertEquals("1234", pickup!!.value)
         assertEquals("菜鸟驿站", pickup.subject)
         assertTrue(pickup.confidence >= 0.9)
     }

@@ -111,14 +111,16 @@ object ZhuliSelfCheckData {
         // ⑤ 出网 + 隐私闸门
         val cloudReady = health.cloudReady || snap.cloudCount > 0
         items += ZhuliSelfCheck.cloud(snap.cloudCount, snap.lastCloudAt, now, cloudReady)
-        val privacyRows = privacyRows(health.cloudReady)
+        val privacyRows = privacyRows()
         val allPrivacyOk = privacyRows.all { it.allOk }
         items += ZhuliSelfCheck.Item(
             group = ZhuliSelfCheck.G_CLOUD,
             label = "隐私闸门",
             value = when {
                 !health.privacyGateEnabled -> "已关闭 —— 所有内容原样出网（点下面开关可恢复）"
-                health.privacyGateActive && allPrivacyOk -> "已接线（聊天请求），${privacyRows.size} 条规则自检全过"
+                health.privacyGateActive && allPrivacyOk ->
+                    "已接线（chat/responses/embeddings + 工具参数），${privacyRows.size} 条规则自检全过"
+
                 health.privacyGateActive -> "已接线，但有 ${privacyRows.count { !it.allOk }} 条规则没过"
                 else -> "拦截器未生效 —— 开关是开的，但请求没走到闸门（重启一次 App）"
             },
@@ -135,9 +137,15 @@ object ZhuliSelfCheckData {
         return items
     }
 
-    /** 隐私三层自检明细（给面板展开看每一条）。 */
-    fun privacyRows(cloudReady: Boolean): List<ZhuliPrivacy.SelfCheck> = ZhuliPrivacy.selfTest3(
-        ZhuliPrivacy.Config(cloudReady = true, baseUrl = "https://tokenrhythm.studio/v1")
+    /**
+     * 隐私三层自检明细（给面板展开看每一条）。
+     *
+     * 这里固定 `cloudReady = true`：测的是「规则能不能拦住内容」，
+     * 不是「用户配没配 Key」；用真实的 Key 状态会让没配 Key 的用户看到一片
+     * 「留本地」而误以为规则都通过了。端点用示例域名，不会产生任何网络请求。
+     */
+    fun privacyRows(): List<ZhuliPrivacy.SelfCheck> = ZhuliPrivacy.selfTest3(
+        ZhuliPrivacy.Config(cloudReady = true, baseUrl = "https://example.com/v1")
     )
 
     /** 采集策略摘要（首页/设置页抬头用）。 */

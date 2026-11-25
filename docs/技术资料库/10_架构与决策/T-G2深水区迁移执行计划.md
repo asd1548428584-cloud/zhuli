@@ -72,7 +72,7 @@ fork 现状：在 `.lastchat_eval/LastChat`（被 gitignore，无独立 git 追�
 用户拍板"内容层接线"后，深挖 LastChat 编排链发现一个比接线方式更根本的问题：
 
 **事实链**（读码确认）：
-1. `GenerationHandler.generateText` 里模型调用 Tool → `tool.execute()` 返回真库结果（取件码 6825 / 金额 / 地址）；
+1. `GenerationHandler.generateText` 里模型调用 Tool → `tool.execute()` 返回真库结果（取件码 / 金额 / 地址）；
 2. 结果以 `UIMessage(role=TOOL, parts=[ToolResult])` 回填 messages；
 3. 下一轮 `generateInternal` 把整个 messages（含 Tool 结果）发给模型生成自然语言回答 → **Tool 结果必然出网**（用云端模型时）。
 4. LastChat 无"Tool 结果本地直出"机制；`maxSteps` 只控制轮数，不能省掉最后那轮自然语言生成。
@@ -111,7 +111,7 @@ fork 现状：在 `.lastchat_eval/LastChat`（被 gitignore，无独立 git 追�
 - **`ZhuliLocalToolBridge`**（bridge，零依赖可 JVM 单测）：判断本地模型（modelId 前缀 `litert-community/`）、生成工具使用说明（约定 Qwen 母语的 `<tool_call>{"name":...,"arguments":{...}}</tool_call>` 格式）、从文本解析调用、剥离标记防复读。6 项 JVM 单测全绿。
 - **GenerationHandler 最小集成**（792 行一处）：原生 toolCalls 为空时尝试解析内嵌调用，成功则剥标记、构造正式 ToolCall 继续既有工具循环。对云端模型无影响（它们不会输出该标记）。
 - **4 个 zhuli Tool 的 systemPrompt 钩子**：本地模型时注入工具清单+格式约定；云端模型返回空。
-- **真机验收**：`ZhuliLocalE2ETest` OK (1 test, 34.9s)——Qwen2.5-1.5B 加载 → 问"我快递到哪了" → 模型输出 `<tool_call>` → 解析执行 → 真库 6825 回灌 → 中文回答。**全程离线，取件码/账本/待办数据不出机**。
+- **真机验收**：`ZhuliLocalE2ETest` OK (1 test, 34.9s)——Qwen2.5-1.5B 加载 → 问"我快递到哪了" → 模型输出 `<tool_call>` → 解析执行 → 真库取件码回灌 → 中文回答。**全程离线，取件码/账本/待办数据不出机**。
 
 **本地模型选型结论（实测）**：
 | 模型 | 结果 |

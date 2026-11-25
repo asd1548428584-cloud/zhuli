@@ -3,13 +3,6 @@ package com.zhuli.bridge
 import android.content.Context
 import com.zhuli.core.AssistantPrefs
 import com.zhuli.core.InboxDatabase
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
@@ -20,34 +13,49 @@ import okio.Buffer
 import java.util.concurrent.Executors
 
 /**
- * 隐私闸门 · 出网拦截器（T-G2/B1 接线，2026-11-24）。
+ * 隐私闸门 · 出网拦截器（T-G2/B1 接线，2026-11-24；批次 A 重写为 fail-closed）。
  *
- * 挂在全局 OkHttpClient 上，只处理"聊天类"请求（chat/completions、responses、messages）：
- * - 逐条取出 messages / system 的文本，交给 [ZhuliPrivacy.decide]；
- * - 命中硬红线（证件号 / 卡号 / 凭证）→ 整条请求拦下，返回 403 + 可读原因，内容不出机；
- * - 普通敏感（手机号 / 地址 / 金额）→ 按脱敏后的文本重建请求体再发；
- * - 每次出网写一条 cloud_log（只记宿主、模型、脱敏处数，不记内容）。
+ * 挂在全局 OkHttpClient 上，处理所有**会把用户原文送出去**的推理接口：
+ * chat/completions、responses、claude messages、gemini generateContent、embeddings、
+ * legacy completions。判定与改写全部委托给 [OutgoingBodyGate] → `PrivacyPipeline`，
+ * 本类只负责 OkHttp 侧的读包/重建/留档。
  *
- * 不做的事（诚实标注）：
- * - 不拦图片/音频的 base64（体积大且规则判定会误伤），也不拦非聊天接口（如 embedding）；
- * - 请求体超过 2MB 直接放行，避免为了检查把内存打爆。
+ * **批次 A 修掉的五个 fail-open**（原实现都是 `chain.proceed(request)` 放行）：
+ * 1. 请求体是 one-shot / duplex → 读不出内容也照发；
+ * 2. 请求体超过 2MB → 不扫，直接发（视觉请求会带 base64 图片，旧上限还会误伤正常功能）；
+ * 3. 读请求体抛异常 → 照发；
+ * 4. 请求体不是 JSON → 照发；
+ * 5. 是 JSON 但没有 `messages`（Responses API 的 `input`、embeddings 的 `input`）→ 当成
+ *    「无敏感项，原样出网」，等于整类请求从未被扫描。
+ *
+ * 现在这些分支一律返回 403 + 可读原因，并写一条 `cloud_log`。
  */
 class ZhuliPrivacyInterceptor(private val context: Context) : Interceptor {
 
     companion object {
-        private val json = Json { ignoreUnknownKeys = true; isLenient = true }
         private val logIo = Executors.newSingleThreadExecutor { r ->
             Thread(r, "zhuli-privacy-log").apply { isDaemon = true }
         }
-        private const val MAX_BODY_BYTES = 2L * 1024 * 1024
 
-        private fun isChatPath(path: String): Boolean {
+        /**
+         * 扫描上限。视觉请求会把 JPEG 转 base64（约 1.33 倍），3 帧 300KB 的图约 1.2MB，
+         * 8MB 足够覆盖正常多模态；超过这个量级说明不是正常的对话请求。
+         */
+        private const val MAX_BODY_BYTES = 8L * 1024 * 1024
+
+        /** 这些路径上的请求体一定含用户原文，必须扫描。 */
+        private fun isScannedPath(path: String): Boolean {
             val p = path.lowercase()
             return p.contains("chat/completions") ||
                 p.endsWith("/completions") ||
                 p.contains("/responses") ||
-                p.contains("/messages")
+                p.contains("/messages") ||
+                p.contains("/embeddings") ||
+                p.contains("generatecontent")
         }
+
+        private fun isLoopback(host: String): Boolean =
+            host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "10.0.2.2"
     }
 
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -58,145 +66,51 @@ class ZhuliPrivacyInterceptor(private val context: Context) : Interceptor {
         }
         ZhuliPrivacyGate.activate()
 
-        if (!isChatPath(request.url.encodedPath)) return chain.proceed(request)
+        if (!isScannedPath(request.url.encodedPath)) return chain.proceed(request)
         // 本机回环（本地模型/本地网关）不算"出网"，不脱敏也不记录
-        val host = request.url.host
-        if (host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "10.0.2.2") {
-            return chain.proceed(request)
+        if (isLoopback(request.url.host)) return chain.proceed(request)
+
+        val model = request.url.encodedPath
+        val body = request.body
+        if (body == null) {
+            log(request, model, ok = false, note = "拦截：请求没有可扫描的请求体")
+            return blockedResponse(request, "请求没有可扫描的请求体，拒绝出网")
         }
-        val body = request.body ?: return chain.proceed(request)
-        if (body.isOneShot() || body.isDuplex()) return chain.proceed(request)
+        if (body.isOneShot() || body.isDuplex()) {
+            log(request, model, ok = false, note = "拦截：请求体一次性/流式，无法预扫描")
+            return blockedResponse(request, "请求体是一次性/流式上传，无法在出网前完成隐私扫描")
+        }
         val declared = body.contentLength()
-        if (declared > MAX_BODY_BYTES) return chain.proceed(request)
+        if (declared > MAX_BODY_BYTES) {
+            log(request, model, ok = false, note = "拦截：请求体 ${declared / 1024}KB 超过扫描上限")
+            return blockedResponse(request, "请求体 ${declared / 1024}KB 超过隐私扫描上限")
+        }
 
         val raw = try {
             Buffer().also { body.writeTo(it) }.readUtf8()
         } catch (t: Throwable) {
-            return chain.proceed(request)
-        }
-        if (raw.isBlank()) return chain.proceed(request)
-
-        val root = try {
-            json.parseToJsonElement(raw) as? JsonObject
-        } catch (t: Throwable) {
-            null
-        } ?: return chain.proceed(rebuild(request, raw, body.contentType()))
-
-        val config = ZhuliPrivacy.Config(
-            cloudReady = true, // 请求本身能发出来就是已配好；这里只判敏感度与地址安全性
-            baseUrl = request.url.toString(),
-            strict = AssistantPrefs.privacyMode(context) == "strict",
-        )
-
-        val outcome = rewrite(root, config)
-        val model = root["model"]?.jsonPrimitive?.contentOrNull.orEmpty()
-
-        if (outcome.blocked != null) {
-            val reason = outcome.blocked
-            log(
-                host = request.url.host,
-                model = model,
-                ok = false,
-                note = "隐私闸门拦截：$reason",
-            )
-            return blockedResponse(request, reason)
+            log(request, model, ok = false, note = "拦截：请求体读取失败 ${t.javaClass.simpleName}")
+            return blockedResponse(request, "请求体读取失败，无法在出网前完成隐私扫描")
         }
 
-        if (outcome.redacted == 0) {
-            log(
-                host = request.url.host,
-                model = model,
-                ok = true,
-                note = "无敏感项，原样出网",
-            )
-            return chain.proceed(rebuild(request, raw, body.contentType()))
-        }
-
-        val newRaw = json.encodeToString(JsonObject.serializer(), outcome.body)
-        log(
-            host = request.url.host,
-            model = model,
-            ok = true,
-            note = "已脱敏 ${outcome.redacted} 处后出网",
-        )
-        return chain.proceed(rebuild(request, newRaw, body.contentType()))
-    }
-
-    // ==================== JSON 改写 ====================
-
-    private class Outcome(
-        val body: JsonObject,
-        val redacted: Int,
-        val blocked: String?,
-    )
-
-    private fun rewrite(root: JsonObject, config: ZhuliPrivacy.Config): Outcome {
-        var redacted = 0
-        var blocked: String? = null
-
-        fun handle(text: String): String? {
-            if (blocked != null || text.isBlank()) return null
-            val d = ZhuliPrivacy.decide(config, ZhuliPrivacy.Task.CHAT, text)
-            if (!d.allow) {
-                blocked = d.reason
-                return null
+        val strict = AssistantPrefs.privacyMode(context) == "strict"
+        return when (val decision = OutgoingBodyGate.decide(raw, strict)) {
+            is OutgoingBodyGate.Decision.Block -> {
+                log(request, model, ok = false, note = "拦截：${decision.reason}")
+                blockedResponse(request, decision.reason)
             }
-            if (d.redacted) {
-                redacted++
-                return d.text.ifBlank { text }
-            }
-            return null
-        }
 
-        fun rewriteContent(el: JsonElement?): JsonElement? {
-            if (el == null) return null
-            return when (el) {
-                is JsonPrimitive -> {
-                    if (!el.isString) return null
-                    handle(el.content)?.let { JsonPrimitive(it) }
+            is OutgoingBodyGate.Decision.Send -> {
+                val s = decision.scanned
+                val note = buildString {
+                    append(s.shape)
+                    append("｜扫描 ").append(s.scannedFields).append(" 字段")
+                    if (s.redactions > 0) append("｜脱敏 ").append(s.redactions).append(" 处")
                 }
-
-                is JsonArray -> {
-                    var changed = false
-                    val parts = el.map { part ->
-                        val obj = part as? JsonObject ?: return@map part
-                        val t = obj["text"] ?: return@map part
-                        if (!t.jsonPrimitive.isString) return@map part
-                        val replaced = handle(t.jsonPrimitive.content) ?: return@map part
-                        changed = true
-                        JsonObject(obj + ("text" to JsonPrimitive(replaced)))
-                    }
-                    if (changed) JsonArray(parts) else null
-                }
-
-                else -> null
+                log(request, model, ok = true, note = note)
+                chain.proceed(rebuild(request, s.body, body.contentType()))
             }
         }
-
-        // messages[*].content
-        val messages = root["messages"] as? JsonArray
-        val newMessages: JsonArray? = messages?.let { arr ->
-            var changed = false
-            val list = arr.map { item ->
-                val obj = item as? JsonObject ?: return@map item
-                val replaced = rewriteContent(obj["content"]) ?: return@map obj
-                changed = true
-                JsonObject(obj + ("content" to replaced))
-            }
-            if (changed) JsonArray(list) else null
-        }
-
-        // system（字符串或分段数组）
-        val systemReplaced = rewriteContent(root["system"])
-
-        if (blocked != null) return Outcome(root, redacted, blocked)
-
-        if (newMessages == null && systemReplaced == null) return Outcome(root, 0, null)
-
-        var out: JsonObject = root
-        if (newMessages != null) out = JsonObject(out + ("messages" to newMessages))
-        if (systemReplaced != null) out = JsonObject(out + ("system" to systemReplaced))
-        return Outcome(out, redacted, null)
     }
 
     // ==================== 请求/响应 ====================
@@ -231,14 +145,14 @@ class ZhuliPrivacyInterceptor(private val context: Context) : Interceptor {
             .build()
     }
 
-    private fun log(host: String, model: String, ok: Boolean, note: String) {
+    private fun log(request: okhttp3.Request, model: String, ok: Boolean, note: String) {
         logIo.execute {
             try {
                 val db = InboxDatabase(context.applicationContext)
                 try {
                     db.appendCloudLog(
                         task = "chat",
-                        host = host,
+                        host = request.url.host,
                         model = model,
                         requestRedacted = "（内容不外存）",
                         ok = ok,
@@ -248,7 +162,7 @@ class ZhuliPrivacyInterceptor(private val context: Context) : Interceptor {
                     runCatching { db.close() }
                 }
             } catch (_: Throwable) {
-                // 日志失败不影响出网
+                // 日志失败不影响出网（拦截已经发生，记录不是放行条件）
             }
         }
     }

@@ -65,7 +65,7 @@ LastChat 与 zhuli 是两个独立应用，各自私有 SQLite（`lastchat` Room
 - **注入桥代码**（在 `.lastchat_eval/zhuli_bridge/`，尚未并入 LastChat）：
   - `ZhuliToolSpecs.kt`：把 zhuli 的 6 个本地工具声明成 LastChat `Tool` 契约的规格层（纯 JVM），含参数归一化与必填校验；8 项单测验证规格合法性/钳制/丢多余字段/坏 JSON 不崩。
   - `CourierAnswer.kt`：快递回答纯函数层。
-- **真实 450 条库验证**：从 `zhuli_inbox_pre_v14_20261121.db` 导出 8 条快递记录为 fixture，喂给 `CourierAnswer`，断言答案含真实取件码 `6825`/`18-3-8221` 与地点，不编造、不错答——4 项单测通过。
+- **真实 450 条库验证**：从 `zhuli_inbox_pre_v14_20261121.db` 导出 8 条快递记录为 fixture，喂给 `CourierAnswer`，断言答案含取件码（形如 `X-Y-Z`）与地点，不编造、不错答——4 项单测通过。
 
 ### 发现并修正的真实缺陷（T-G1 的核心价值）
 
@@ -78,11 +78,11 @@ LastChat 与 zhuli 是两个独立应用，各自私有 SQLite（`lastchat` Room
 
 ### T-G1 完成：真机验收通过（2026-11-21 16:50）
 
-**决策点结论：fork LastChat + 注入本地 Tool 的方案完全跑通。** 真机 instrumentation 测试 `OK (2 tests)`：注入的 `list_courier` Tool 在真机上从 assets 快照查出真实取件码 6825，回答含"待取快递"且不错答"没有待取"。
+**决策点结论：fork LastChat + 注入本地 Tool 的方案完全跑通。** 真机 instrumentation 测试 `OK (2 tests)`：注入的 `list_courier` Tool 在真机上从本地库查出取件码，回答含"待取快递"且不错答"没有待取"。
 
 - **完整编译成功**：`:app:assembleDevDebug` BUILD SUCCESSFUL，产出 4 个 ABI 的 APK；arm64 包 191MB 装机成功，App 启动无崩溃。注入代码 `com.zhuli.bridge.*` 与主项目 `LocalTools.getTools()` 的注入行均通过真实 Kotlin 编译。
 - **数据桥最终形态**：不用裁剪 `InboxDatabase`（SQLiteOpenHelper + 私有库）。改为 `ZhuliCourierTool`（`app/src/main/java/com/zhuli/bridge/`）——把真库快照 `zhuli_inbox_pre_v14_20261121.db`（496KB，8 条快递）放进 `app/src/main/assets/zhuli_inbox_snapshot.db`，首次运行复制到 filesDir 用 `SQLiteDatabase.OPEN_READONLY` 查 `inbox` 表，`execute` 复用 `CourierAnswer` 纯函数。注入点：`LocalTools.kt:getTools()`（705 行后）加一行 `tools.add(ZhuliCourierTool(context = context).asTool())`；`LocalTools` 是 class 且有 `context` 字段，无需改构造器；唯一调用方 `ChatService.kt:1937` 无需改。
-- **真机验收证据**：`app/src/androidTest/.../ZhuliCourierInstrumentedTest.kt`（2 用例）真机跑通——① `queryCourier_fromAssetsSnapshot_returnsRealPickupCodes` 断言含 6825 + "待取"；② `asTool_hasCorrectNameAndSchema` 断言注册为 `list_courier`。
+- **真机验收证据**：`app/src/androidTest/.../ZhuliCourierInstrumentedTest.kt`（2 用例）真机跑通——① `queryCourier_readsLocalInboxAndReturnsCodes` 断言含取件码结构 + "待取"；② `asTool_hasCorrectNameAndSchema` 断言注册为 `list_courier`。
 
 #### 编译攻关记录（可复用的环境坑，详见接线 RUNBOOK.md）
 1. **拉源码**：github.com 断、raw.githubusercontent.com 通（间歇）。用 `git ls-tree -r --name-only HEAD <dir>`（只需本地元数据）列路径 + `curl raw` 逐文件拉；分模块多轮快速扫描（每文件短超时、失败跳过、多轮迭代），最终 12 模块 + web-ui(151) + catalog(125) + app/res(67) + app/schemas(39) + dev/stable flavor res 全部拉齐。git sparse 失败的真因是 stale `*.lock` + 临时 pack，清锁后单进程才成功。
@@ -103,7 +103,7 @@ LastChat 与 zhuli 是两个独立应用，各自私有 SQLite（`lastchat` Room
 - **第二处真库口径修正**：`list_todo` 主项目查 `inbox.deadline_at > now`，真机快照里待办全在 `reminders` 表且时间已过 → 照搬会空答；改为查 `reminders` 的 `status IN ('pending','scheduled')`，标注"时间已过"与置信依据。与 T-G1 的 `list_courier` 缺陷同类——**每次照搬主项目口径到快照库，都必须用真库数据验一遍**。
 - **验证边界**：10 项纯 JVM 口径自检全绿（真库 fixture `fixture_query.json`，临时编进主项目测试源跑完已清理，主工程未污染）；fork `:app:compileDevDebugKotlin` BUILD SUCCESSFUL。按用户"先不要测"：**未 assemble、未装机、未跑真机对话**。
 ### T-G2 端到端验收（2026-11-21 17:39，用户："跑吧，端到端跑一遍，然后继续推进"）
-- **结果**：真机 `OK (4 tests)`。免费 `egg-alpha-003` 经 `-e zhuli.e2e.key` 注入（不落 APK/盘），走 LastChat 真实 `GenerationHandler.generateText`，构造内存 Settings 让模型在对话里**自主**选 Tool，逐一验证 4 个 Tool 都被调用且 ToolResult 含真库值（6825 / 6825 / 餐饮通讯 / 取件驿站）。至此 T-G1 遗留的"模型端自主调用"缺口完全闭环。
+- **结果**：真机 `OK (4 tests)`。免费 `egg-alpha-003` 经 `-e zhuli.e2e.key` 注入（不落 APK/盘），走 LastChat 真实 `GenerationHandler.generateText`，构造内存 Settings 让模型在对话里**自主**选 Tool，逐一验证 4 个 Tool 都被调用且 ToolResult 含真库值（取件码 / 取件码 / 餐饮通讯 / 驿站）。至此 T-G1 遗留的"模型端自主调用"缺口完全闭环。
 - **验收暴露并修复 3 个真问题**：① `list_todo` 的 `IFNULL(basis,'')` 无别名导致 `getColumnIndexOrThrow("basis")` 抛异常被吞 → 加 `AS basis`；② 真机 filesDir 残留 T-G1 旧快照库（缺 reminders/embeddings、大小却相同）→ `ZhuliSnapshotDb` 加"必需表校验 + 缺表重拷"自愈；③ 测试里 `MessageRole` 包路径（`me.rerere.ai.core`）。三者都只有真机跑才暴露。
 - **T-G2 深水区（2026-11-21 17:45，用户拍板"全速迁移到删旧壳"）**：已放行。但两份能力盘点后做**策略修正**——原 V3.1 的"替换工具循环/记忆层"是倒退（LastChat 这两块远强于旧壳），改为"保留 LastChat 主干 + 移植 zhuli 独有能力（隐私闸门/自检/确认口径/收件箱 Tool）"。详见 [T-G2深水区迁移执行计划.md](./T-G2深水区迁移执行计划.md)。分 B1~B7 批推进，每批可回滚；删旧壳（B7）不可逆，回归全绿后单独拍板落点。
 

@@ -42,6 +42,15 @@ tmp_*.png
 .lastchat_eval/
 fixtures/courier_real.json
 
+# ===== 真机取证（批次 A）：短信/通知原文、取件码、地址、设备名、UI dump =====
+# 这些是"证据"，不是"测试夹具"。要留证据就留在本机，不要进公开仓库。
+fixtures/realdev_*/
+fixtures/*_real*.json
+**/session-*.jsonl
+**/session*.jsonl.zstd
+**/*.jsonl.zstd
+docs/archive/**/screenshots/
+
 # ===== 真实 API Key（E2E 测试用，只放本地，绝不入库）=====
 # 与远端镜像 0f2e3e2 保持一致；本地额外收紧到 assets 目录下任何 *_key.txt / *.db
 zhuli_e2e_key.txt

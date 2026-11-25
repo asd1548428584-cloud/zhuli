@@ -101,8 +101,10 @@ object ZhuliAgentRuntime : KoinComponent {
         cloudReady && !com.zhuli.core.PrivacyRouter
             .decide(appCtx, com.zhuli.core.PrivacyRouter.Task.CHAT, goal).allow
     } catch (t: Throwable) {
-        // 判定本身出问题时不擅自降级（宁可让 Gate 去拦，也不要静默改变执行路径）
-        false
+        // 判定本身出问题时不放行云端：宁可这一轮只在本机跑（可能答不出来），
+        // 也不能因为判定异常而默认走云 —— 那是 fail-open（批次 A 口径）。
+        com.zhuli.core.ZhuliLog.w("zhuli.agent", "隐私判定异常，本轮按仅本机处理", t)
+        true
     }
 
     suspend fun approve(taskId: String, allow: Boolean) = withContext(Dispatchers.IO) {
@@ -115,6 +117,10 @@ object ZhuliAgentRuntime : KoinComponent {
     /**
      * 本地推理：复用上游已验证的 ProviderManager 链路（与晨间简报同一套），
      * 不另起一个 LiteRT 实例。找不到模型就如实抛 UNAVAILABLE，让网关降级而不是假装成功。
+     *
+     * 批次 A：**必须**校验 provider 是端侧实现。旧实现直接拿 `backgroundModelId` 去
+     * `getProviderByType`，用户把后台模型配成云厂商时，这条「本地」链路会把 prompt 发到云上，
+     * 而网关仍以为 `leavesDevice = false`。
      */
     private suspend fun generateLocal(prompt: String): String {
         val settings = settingsStore.settingsFlow.first { !it.init }
@@ -122,6 +128,8 @@ object ZhuliAgentRuntime : KoinComponent {
         val modelId = assistant?.backgroundModelId ?: assistant?.chatModelId ?: settings.chatModelId
         val model = settings.findModelById(modelId) ?: error("model_not_installed:no_model_configured")
         val providerSetting = model.findProvider(settings.providers) ?: error("model_not_installed:no_provider")
+        // 端侧链路只接受 LiteRtLocal；云 provider 在这里就被拒绝（UNAVAILABLE，不会触发云端降级）
+        LocalBackendPolicy.requireOnDevice(providerSetting)
         val handler = providerManager.getProviderByType(providerSetting)
         return handler.generateText(
             providerSetting = providerSetting,

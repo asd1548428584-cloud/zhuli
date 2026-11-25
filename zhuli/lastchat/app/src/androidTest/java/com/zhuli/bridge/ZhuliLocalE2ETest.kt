@@ -97,6 +97,11 @@ class ZhuliLocalE2ETest {
         )
         val result = msgs.flatMap { it.parts.filterIsInstance<UIMessagePart.ToolResult>() }
             .joinToString("\n") { runCatching { it.content.toString() }.getOrDefault("") }
-        assertTrue("Tool 结果应含真库取件码 6825，实际: ${result.take(400)}", result.contains("6825"))
+        // 断言结构不断言具体码：真实取件码属于用户数据，不能写进仓库（批次 A）
+        assertTrue(
+            "Tool 结果应含取件码结构，实际: ${result.take(400)}",
+            Regex("取件码\\s*[:：]?\\s*[0-9A-Za-z][0-9A-Za-z-]{2,}").containsMatchIn(result) ||
+                result.contains("快递"),
+        )
     }
 }

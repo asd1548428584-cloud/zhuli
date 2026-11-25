@@ -48,6 +48,40 @@ object SensitiveGuard {
             "|(?:\\d{1,4}\\s*号楼|\\d{1,4}\\s*单元|\\d{3,4}\\s*室|门牌号|小区\\s*\\d|\\d+\\s*栋)"   // 强特征
     )
 
+    /**
+     * 快递取件码（批次 A 新增）。
+     *
+     * 两类都要认：
+     * 1. **带语境**：`取件码 6825` / `提取码：8xk2` / `凭 1234 取件`；
+     * 2. **裸结构**：`18-3-8221` / `6-1-3344` —— Agent 调 `save_fact(value="18-3-8221")` 时没有语境，
+     *    只靠第 1 类会漏。结构本身足够特殊（1–2 位 + 1–2 位 + 3–5 位），误伤面很小。
+     */
+    private val PICKUP = Pattern.compile(
+        "(?:取件码|取货码|提取码|领取码|取件号|取货号)\\s*(?:是|为|=)?\\s*[:：]?\\s*[0-9A-Za-z][0-9A-Za-z-]{2,15}" +
+            "|凭\\s*[0-9A-Za-z][0-9A-Za-z-]{2,10}\\s*取" +
+            "|(?<![\\d-])\\d{1,2}-\\d{1,2}-\\d{3,5}(?![\\d-])"
+    )
+
+    /**
+     * 运单号 / 订单号（批次 A 新增）。
+     *
+     * 10–15 位纯数字既不落在手机号（11 位但首位固定 1）也不落在银行卡（16–19 位）里，
+     * 是现行规则的真实盲区；再补常见承运商前缀（顺丰 SF / 圆通 YT / 中通 ZT / 京东 JD…）。
+     */
+    private val WAYBILL = Pattern.compile(
+        "(?:运单号|快递单号|物流单号|订单号|包裹号)\\s*[:：]?\\s*[A-Za-z0-9][A-Za-z0-9-]{5,23}" +
+            "|(?<![A-Za-z0-9])(?:SF|YT|ZT|YD|JD|JT|DBL|CNSD|STO)[A-Z0-9]{8,18}(?![A-Za-z0-9])"
+    )
+
+    /**
+     * GPS 坐标（批次 A 新增）。
+     *
+     * `{{location}}` 占位符在拿不到地址时会退化成 `39.9042,116.4074` 这种裸坐标，
+     * 它既不是地址（没有省市区路），也不是任何现有类型 —— 一旦被拼进 system prompt，
+     * 就等于把用户位置原样上云。两位小数以上 + 逗号分隔是足够强的结构特征。
+     */
+    private val COORD = Pattern.compile("(?<![\\d.])(?:-?\\d{1,3}\\.\\d{3,})[,\\s]+(?:-?\\d{1,3}\\.\\d{3,})(?![\\d.])")
+
     /** 公司名 + 岗位的组合型敏感（需求 §6 那条开放问题，这里定成「算敏感」） */
     private val ORG = Pattern.compile("(?:公司|集团|股份|有限|科技|银行|医院|学校|大学|研究院|事务所)")
     private val ROLE = Pattern.compile(
@@ -62,6 +96,9 @@ object SensitiveGuard {
         BANK_CARD.matcher(text).find() -> "卡号"
         CREDENTIAL.matcher(text).find() -> "凭证"
         URL_WITH_SECRET.matcher(text).find() -> "凭证链接"
+        PICKUP.matcher(text).find() -> "取件码"
+        WAYBILL.matcher(text).find() -> "运单号"
+        COORD.matcher(text).find() -> "坐标"
         MONEY.matcher(text).find() -> "金额"
         ADDRESS.matcher(text).find() -> "地址"
         ORG.matcher(text).find() && ROLE.matcher(text).find() -> "公司+岗位"
@@ -80,7 +117,7 @@ object SensitiveGuard {
     fun hits(text: String): List<String> {
         if (text.isBlank()) return emptyList()
         val out = mutableListOf<String>()
-        for (p in listOf(PHONE, ID_CARD, BANK_CARD, MONEY, CREDENTIAL, URL_WITH_SECRET, ADDRESS)) {
+        for (p in listOf(PHONE, ID_CARD, BANK_CARD, PICKUP, WAYBILL, COORD, MONEY, CREDENTIAL, URL_WITH_SECRET, ADDRESS)) {
             val m = p.matcher(text)
             while (m.find()) m.group().takeIf { it.isNotBlank() }?.let { out += it }
         }
@@ -103,6 +140,11 @@ object SensitiveGuard {
         s = PHONE.matcher(s).replaceAll("[手机号]")
         s = ID_CARD.matcher(s).replaceAll("[证件号]")
         s = BANK_CARD.matcher(s).replaceAll("[卡号]")
+        // 取件码/运单号先于金额：`取件码 6825` 若先过 MONEY 不会命中，但 `凭 6825 取`
+        // 的裸结构必须先被收走，避免"码还在、只把动词打掉"的半脱敏。
+        s = PICKUP.matcher(s).replaceAll("[取件码]")
+        s = WAYBILL.matcher(s).replaceAll("[运单号]")
+        s = COORD.matcher(s).replaceAll("[坐标]")
         s = MONEY.matcher(s).replaceAll("[金额]")
         s = CREDENTIAL.matcher(s).replaceAll("[凭证]")
         s = URL_WITH_SECRET.matcher(s).replaceAll("[凭证链接]")
