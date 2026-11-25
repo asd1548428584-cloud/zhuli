@@ -156,6 +156,11 @@ class AgentLoop(
 
     /** 从 RUNNING 状态进入主循环。单独抽出，供 run 与 approve 共用。 */
     private suspend fun resumeRun(task: AgentTask, taskId: String, started: Long = clock()): RunOutcome {
+        // 批次 B1 修复：maxSteps 是「单次运行」的步数预算（提示语一直写着"单次步数上限"），
+        // 旧实现拿任务终身步数来判断，暂停恢复后预算永不重置——每次恢复只在循环顶部
+        // 追加一条 NOTE，任务永远卡在 PAUSED 直到撞 hardStepCap 变 FAILED。
+        // 现在每次运行（含恢复）都重新领 8 步预算；防跑飞的 hardStepCap 仍按终身步数计算。
+        val runStartSteps = store.stepsCount(taskId)
         var current = task
         while (true) {
             val stopped = checkStop(current, taskId, started)
@@ -169,9 +174,9 @@ class AgentLoop(
                 store.appendStep(note(taskId, "本次运行超过 ${maxWallClockMs / 1000} 秒，已暂停；可以点「继续」接着跑。"))
                 return RunOutcome.Paused(paused, "超时暂停")
             }
-            if (stepCount >= maxSteps) {
+            if (store.stepsCount(taskId) - runStartSteps >= maxSteps) {
                 val paused = move(current, TaskStatus.PAUSED)
-                store.appendStep(note(taskId, "已达单次步数上限（$maxSteps），先停在这里，避免无休止调用模型。"))
+                store.appendStep(note(taskId, "本次运行已达步数上限（$maxSteps），先停在这里，避免无休止调用模型；点「继续」接着跑。"))
                 return RunOutcome.Paused(paused, "步数上限")
             }
 

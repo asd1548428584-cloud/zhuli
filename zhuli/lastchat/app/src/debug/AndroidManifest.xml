@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    仅 Debug 构建合并此清单（src/debug 不参与 release 编译）。
+    AgentTestReceiver 是批次 B1 的脚本化测试入口：只能由 adb shell am broadcast 触发，
+    生产（Release）APK 里不存在这个接收器，也不存在任何场景脚本 / Mock 工具。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <receiver
+            android:name="com.zhuli.debug.AgentTestReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.zhuli.debug.TEST" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

@@ -83,6 +83,26 @@ object ZhuliAgentRuntime : KoinComponent {
     /** UI 取用的是同一个实例，不再每次 new 出一个没有授权/并发状态的空壳。 */
     fun loop(): AgentLoop = _loop
 
+    val isInitialized: Boolean get() = initialized
+
+    /**
+     * Debug 测试钩子挂载点（批次 B1）。
+     *
+     * 生产代码零调用方；唯一的调用者是 app/src/debug 下的 [com.zhuli.debug.AgentTestHarness]
+     * （该目录不参与 Release 编译，Release APK 里没有任何场景脚本 / Mock 工具 / 测试接收器）。
+     * Mock 模型后端与 Mock 工具注册后走**同一个**共享 loop、同一套 PolicyEngine 与审批流程，
+     * 不存在绕过审批的旁路。
+     */
+    fun registerTestProvider(p: ModelProvider) {
+        check(initialized) { "请先 init(context) 再注册测试后端" }
+        _router.registerProviderForTest(p)
+    }
+
+    fun registerTestTool(t: RegisteredTool) {
+        check(initialized) { "请先 init(context) 再注册测试工具" }
+        _tools.registerToolForTest(t)
+    }
+
     /**
      * 发起任务。
      *

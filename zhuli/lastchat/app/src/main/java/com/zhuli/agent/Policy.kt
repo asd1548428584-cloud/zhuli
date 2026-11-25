@@ -57,23 +57,39 @@ class ToolRegistry(tools: List<RegisteredTool>) {
 
     private val byName: Map<String, RegisteredTool>
 
+    /**
+     * Debug 测试钩子的动态注册口。生产代码零调用方；调用者只存在于 app/src/debug
+     * 的测试钩子里（不进 Release APK）。注册的 Mock 工具与真实工具同走 policy/审批，
+     * 没有任何旁路。
+     */
+    private val extras = java.util.concurrent.CopyOnWriteArrayList<RegisteredTool>()
+
+    fun registerToolForTest(t: RegisteredTool) {
+        require(!byName.containsKey(t.spec.name) && extras.none { it.spec.name == t.spec.name }) {
+            "测试工具名与现有工具冲突：${t.spec.name}"
+        }
+        extras.add(t)
+    }
+
+    private fun allTools(): List<RegisteredTool> = byName.values + extras
+
     init {
         val dup = tools.groupBy { it.spec.name }.filterValues { it.size > 1 }.keys
         require(dup.isEmpty()) { "工具名重复：$dup" }
         byName = tools.associateBy { it.spec.name }
     }
 
-    fun get(name: String): RegisteredTool? = byName[name]
+    fun get(name: String): RegisteredTool? = byName[name] ?: extras.firstOrNull { it.spec.name == name }
 
-    fun specs(): List<ToolSpec> = byName.values.map { it.spec }
+    fun specs(): List<ToolSpec> = allTools().map { it.spec }
 
     /** 只给模型看它当前被允许用的工具（比如本地模型不支持工具时传空表）。 */
     fun specsFor(allow: (RegisteredTool) -> Boolean): List<ToolSpec> =
-        byName.values.filter(allow).map { it.spec }
+        allTools().filter(allow).map { it.spec }
 
-    fun all(): List<RegisteredTool> = byName.values.toList()
+    fun all(): List<RegisteredTool> = allTools()
 
-    fun describe(): String = byName.values.joinToString("\n") { t ->
+    fun describe(): String = allTools().joinToString("\n") { t ->
         "· ${t.spec.name}（${t.risk.label}）${t.spec.description.take(40)}"
     }
 }

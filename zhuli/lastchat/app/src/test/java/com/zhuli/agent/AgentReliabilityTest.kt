@@ -297,4 +297,41 @@ class AgentReliabilityTest {
         assertEquals(2, results.count { it is RunOutcome.AlreadyActive })
         assertEquals(1, store.recent(50).size)
     }
+
+    /**
+     * 批次 B1 回归：步数上限暂停后，恢复必须能继续推进并完成。
+     * 旧实现拿任务终身步数当"单次"预算，恢复后预算永不重置——每次 resume 只追加一条
+     * NOTE，任务永远卡在 PAUSED 直到撞 hardStepCap 变 FAILED。
+     */
+    @Test
+    fun `步数上限暂停后恢复能继续推进并完成`() = runBlocking {
+        val store = InMemoryAgentStore()
+        val tools = listOf(tool("step") { ToolResult.ok("ok") })
+        val p = ScriptedProvider()
+        p.onComplete = { _, i ->
+            if (i < 6) resp("", listOf(call("c$i", "step", """{"query":"$i"}""")))
+            else resp("长任务完成")
+        }
+        val l = loop(store, p, tools, maxSteps = 4)
+        val first = l.start("长任务")
+        assertTrue("应因单次步数上限暂停：$first", first is RunOutcome.Paused)
+        val task = store.recent(1).first()
+        assertEquals(TaskStatus.PAUSED, store.get(task.id)?.status)
+
+        // 恢复若干次直到完成；每次恢复都应推进（新步数增长），而不是原地打转
+        var out: RunOutcome = l.run(task.id)
+        var resumes = 0
+        var prevSteps = store.stepsCount(task.id)
+        while (out is RunOutcome.Paused && resumes < 10) {
+            out = l.run(task.id)
+            resumes++
+            val now = store.stepsCount(task.id)
+            assertTrue("恢复第 $resumes 次没有推进（$prevSteps → $now）", now > prevSteps)
+            prevSteps = now
+        }
+        assertTrue("恢复 $resumes 次后仍未完成：$out", out is RunOutcome.Completed)
+        assertEquals("长任务完成", store.get(task.id)?.result)
+        // 防跑飞上限依然生效：总步数被 hardStepCap=24 兜底
+        assertTrue(store.stepsCount(task.id) < 24)
+    }
 }

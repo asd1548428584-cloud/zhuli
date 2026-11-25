@@ -167,7 +167,18 @@ class ModelRouter(
 ) {
     private val all: List<ModelProvider> = providers.filter { it.capabilities.tier > 0 }
 
-    val capabilities: List<ModelCapabilities> get() = all.map { it.capabilities }
+    /**
+     * Debug 测试钩子的动态注册口。生产代码零调用方；调用者只存在于 app/src/debug
+     * 的测试钩子里（不进 Release APK）。注册的脚本后端与静态后端走同一套路由规则。
+     */
+    private val extras = java.util.concurrent.CopyOnWriteArrayList<ModelProvider>()
+
+    fun registerProviderForTest(p: ModelProvider) {
+        extras.add(p)
+        onEvent("测试后端已注册：${p.capabilities.providerId}/${p.capabilities.modelId}")
+    }
+
+    val capabilities: List<ModelCapabilities> get() = (all + extras).map { it.capabilities }
 
     /**
      * @param needTools 这一步是否必须调工具
@@ -176,7 +187,7 @@ class ModelRouter(
      */
     suspend fun complete(request: ModelRequest, needTools: Boolean = request.tools.isNotEmpty(), localOnly: Boolean = false): ModelResponse {
         val onlyLocal = localOnly || request.localOnly
-        val candidates = all
+        val candidates = (all + extras)
             .filter { !onlyLocal || !it.capabilities.leavesDevice }
             .filter { !needTools || it.capabilities.tools }
             .sortedWith(compareByDescending<ModelProvider> { it.capabilities.tier })
@@ -212,7 +223,7 @@ class ModelRouter(
     }
 
     /** 给自检/设置页看：现在到底有哪几个后端、各自能干什么。 */
-    fun describe(): String = all.joinToString("\n") { p ->
+    fun describe(): String = (all + extras).joinToString("\n") { p ->
         val c = p.capabilities
         "· ${c.providerId}｜${c.modelId}｜${if (c.kind == ProviderKind.CLOUD) "云" else "本地"}" +
             "｜工具${if (c.tools) "✓" else "✗"}｜上下文 ${c.maxContextTokens}｜能力档 ${c.tier}"
