@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <boolean name="noise_purged_v1" value="true" />
+    <float name="spot_home_lat" value="39.9" />
+    <float name="spot_home_lng" value="116.4" />
+    <string name="spot_home_name">家</string>
+</map>

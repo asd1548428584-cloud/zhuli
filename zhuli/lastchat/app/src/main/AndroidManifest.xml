@@ -1,0 +1,351 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.CAMERA" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <!-- [zhuli B4] 系统提醒（create_reminder Tool）到点弹通知 -->
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+  <!-- [zhuli B5] 访问旧壳 zhuli 实时数据桥（signature 级，同签名授权） -->
+  <uses-permission android:name="com.zhuli.app.permission.READ_INBOX" />
+  <!-- [zhuli B7] 迁移的提醒引擎：开机重排闹钟 -->
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+  <!-- [zhuli B8 回归] 提醒写回系统日历：ReminderEngine→CalendarWriter 一直在调，
+       但 B7 迁移漏了这两个声明，真机上是"静默失败"（写了没报错、日历里没有） -->
+  <uses-permission android:name="android.permission.READ_CALENDAR" />
+  <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+  <!-- [zhuli B8] 取件码短信通道：RECEIVE 走实时接收，READ 用于"扫历史 7 天"+ 自检真实状态 -->
+  <uses-permission android:name="android.permission.RECEIVE_SMS" />
+  <uses-permission android:name="android.permission.READ_SMS" />
+  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+  <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+  <uses-permission android:name="android.permission.VIBRATE" />
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+  <uses-feature
+    android:name="android.hardware.camera"
+    android:required="false" />
+  <uses-feature
+    android:name="android.hardware.camera.autofocus"
+    android:required="false" />
+
+  <application
+        android:name=".LastChatApp"
+    android:allowBackup="true"
+    android:appCategory="productivity"
+    android:largeHeap="true"
+    android:dataExtractionRules="@xml/data_extraction_rules"
+    android:enableOnBackInvokedCallback="true"
+    android:fullBackupContent="@xml/backup_rules"
+    android:icon="@mipmap/ic_launcher_lastchat"
+    android:label="@string/app_name"
+    android:supportsRtl="true"
+    android:theme="@style/Theme.Rikkahub"
+        android:usesCleartextTraffic="true"
+    tools:targetApi="33">
+    <!-- AGP lint can fail to resolve ComponentActivity/Glance inheritance here during lintVitalRelease. -->
+    <activity
+      android:name=".RouteActivity"
+      android:configChanges="keyboardHidden|orientation|screenSize"
+      android:exported="true"
+      android:importantForAutofill="noExcludeDescendants"
+      android:theme="@style/Theme.Rikkahub"
+      android:windowSoftInputMode="adjustResize"
+      tools:ignore="Instantiatable">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <meta-data
+          android:name="android.app.shortcuts"
+          android:resource="@xml/shortcuts" />
+    </activity>
+
+    <activity
+        android:name=".ui.activity.ShareWithCharacterActivity"
+        android:exported="true"
+        android:label="@string/share_handler_page_title"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        tools:ignore="Instantiatable">
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="*/*" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="*/*" />
+      </intent-filter>
+    </activity>
+
+    <activity
+        android:name=".ui.activity.AskLastChatShareActivity"
+        android:exported="true"
+        android:label="@string/text_selection_menu_label"
+        android:theme="@style/Theme.Rikkahub.Translucent"
+        android:configChanges="keyboardHidden|orientation|screenSize"
+        android:windowSoftInputMode="adjustResize"
+        tools:ignore="Instantiatable">
+      <intent-filter>
+        <action android:name="android.intent.action.SEND" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="*/*" />
+      </intent-filter>
+      <intent-filter>
+        <action android:name="android.intent.action.SEND_MULTIPLE" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <data android:mimeType="*/*" />
+      </intent-filter>
+    </activity>
+
+    <activity
+        android:name=".ui.activity.ShortcutHandlerActivity"
+        android:exported="true"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        tools:ignore="Instantiatable">
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <data android:scheme="lastchat" android:host="assistant" />
+        </intent-filter>
+    </activity>
+
+    <activity
+        android:name=".ui.activity.McpOAuthRedirectActivity"
+        android:exported="true"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data
+                android:host="mcp"
+                android:pathPrefix="/oauth/"
+                android:scheme="lastchat" />
+        </intent-filter>
+        <intent-filter>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data
+                android:host="mcp-oauth-callback"
+                android:scheme="lastchat" />
+        </intent-filter>
+    </activity>
+
+    <!-- Text Selection Integration - "Ask LastChat" in system text selection menu -->
+    <activity
+        android:name=".ui.activity.TextSelectionActivity"
+        android:exported="true"
+        android:label="@string/text_selection_menu_label"
+        android:theme="@style/Theme.Rikkahub.Translucent"
+        android:configChanges="keyboardHidden|orientation|screenSize"
+        android:windowSoftInputMode="adjustResize"
+        tools:ignore="Instantiatable">
+        <intent-filter>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <category android:name="android.intent.category.DEFAULT" />
+            <data android:mimeType="text/plain" />
+        </intent-filter>
+    </activity>
+
+
+    <service
+        android:name=".service.WebServerService"
+        android:exported="false"
+        android:foregroundServiceType="specialUse">
+      <property
+          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+          android:value="Persistent local HTTP server that serves the LastChat web UI on the LAN" />
+    </service>
+
+    <service
+        android:name="androidx.work.impl.foreground.SystemForegroundService"
+        android:foregroundServiceType="dataSync"
+        tools:node="merge" />
+
+    <service
+        android:name=".service.AssistantNotificationListener"
+        android:label="Assistant Notification Listener"
+        android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+        android:exported="true">
+        <intent-filter>
+            <action android:name="android.service.notification.NotificationListenerService" />
+        </intent-filter>
+    </service>
+
+    <!-- Digital Assistant: makes LastChat selectable as the default assistant app -->
+    <service
+        android:name=".service.assist.LastChatVoiceInteractionService"
+        android:label="@string/assistant_overlay_service_label"
+        android:permission="android.permission.BIND_VOICE_INTERACTION"
+        android:exported="true">
+        <meta-data
+            android:name="android.voice_interaction"
+            android:resource="@xml/lastchat_voice_interaction_service" />
+        <intent-filter>
+            <action android:name="android.service.voice.VoiceInteractionService" />
+        </intent-filter>
+    </service>
+
+    <service
+        android:name=".service.assist.LastChatVoiceInteractionSessionService"
+        android:permission="android.permission.BIND_VOICE_INTERACTION"
+        android:exported="true" />
+
+    <service
+        android:name=".service.assist.LastChatRecognitionService"
+        android:exported="true">
+        <intent-filter>
+            <action android:name="android.speech.RecognitionService" />
+        </intent-filter>
+        <meta-data
+            android:name="android.speech"
+            android:resource="@xml/lastchat_recognition_service" />
+    </service>
+
+    <service
+        android:name=".service.workspace.WorkspaceEnvironmentService"
+        android:exported="false"
+        android:foregroundServiceType="dataSync" />
+
+    <!-- Floating assistant overlay launched by the assist gesture -->
+    <activity
+        android:name=".ui.activity.AssistantOverlayActivity"
+        android:exported="false"
+        android:theme="@style/Theme.Rikkahub.Translucent"
+        android:excludeFromRecents="true"
+        android:launchMode="singleTask"
+        android:taskAffinity="lastchat.rikkafork.cocolal.assistant"
+        android:configChanges="keyboardHidden|orientation|screenSize"
+        android:windowSoftInputMode="adjustResize"
+        tools:ignore="Instantiatable" />
+
+    <provider
+      android:name="androidx.core.content.FileProvider"
+      android:authorities="${applicationId}.fileprovider"
+      android:exported="false"
+      android:grantUriPermissions="true">
+      <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/file_paths" />
+    </provider>
+
+    <provider
+      android:name="androidx.startup.InitializationProvider"
+      android:authorities="${applicationId}.androidx-startup"
+      android:exported="false"
+      tools:node="merge">
+      <meta-data
+        android:name="androidx.work.WorkManagerInitializer"
+        android:value="androidx.startup"
+        tools:node="remove" />
+    </provider>
+    <receiver
+        android:name=".service.ScheduledMessageReceiver"
+        android:exported="false" />
+
+    <!-- [zhuli B4] create_reminder 到点广播（显式组件 PendingIntent，仅本应用） -->
+    <receiver
+        android:name="com.zhuli.bridge.ZhuliAlarmReceiver"
+        android:exported="false" />
+
+    <!-- [zhuli B8] 提醒通知上的处置按钮（完成 / 稍后 / 撤销） -->
+    <receiver
+        android:name="com.zhuli.bridge.ZhuliReminderActionReceiver"
+        android:exported="false" />
+
+    <!-- [zhuli B8] 取件码短信：收到即解析，只落"命中快递特征"的那一条摘要 -->
+    <receiver
+        android:name="com.zhuli.bridge.ZhuliSmsReceiver"
+        android:exported="true"
+        android:permission="android.permission.BROADCAST_SMS">
+      <intent-filter android:priority="900">
+        <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+      </intent-filter>
+    </receiver>
+
+    <!-- [zhuli B7] 迁移的提醒引擎组件（zhuli.core） -->
+    <receiver
+        android:name="com.zhuli.core.AlarmReceiver"
+        android:exported="false" />
+    <receiver
+        android:name="com.zhuli.core.ReminderActionReceiver"
+        android:exported="false" />
+    <!-- [zhuli B8 S2] Shizuku provider（授权向导必需） -->
+    <provider
+        android:name="rikka.shizuku.ShizukuProvider"
+        android:authorities="${applicationId}.shizuku"
+        android:multiprocess="false"
+        android:enabled="true"
+        android:exported="true"
+        android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+
+    <receiver
+        android:name="com.zhuli.core.BootReceiver"
+        android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+        <action android:name="android.intent.action.TIME_SET" />
+        <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+      </intent-filter>
+    </receiver>
+
+    <!-- Assistant Widget -->
+    <receiver
+        android:name=".widget.AssistantWidgetReceiver"
+        android:exported="true"
+        android:label="@string/widget_assistant_name"
+        tools:ignore="Instantiatable">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+      </intent-filter>
+      <meta-data
+          android:name="android.appwidget.provider"
+          android:resource="@xml/widget_assistant_info" />
+    </receiver>
+
+    <activity
+        android:name=".widget.WidgetConfigActivity"
+        android:exported="true"
+        android:theme="@style/Theme.Rikkahub"
+        tools:ignore="Instantiatable">
+      <intent-filter>
+        <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+      </intent-filter>
+    </activity>
+  </application>
+
+  <queries>
+    <intent>
+      <action android:name="android.intent.action.TTS_SERVICE" />
+    </intent>
+    <intent>
+      <action android:name="android.speech.RecognitionService" />
+    </intent>
+    <!-- zhuli：来源白名单要能列出已安装应用（只查有启动图标的，不用 QUERY_ALL_PACKAGES） -->
+    <intent>
+      <action android:name="android.intent.action.MAIN" />
+      <category android:name="android.intent.category.LAUNCHER" />
+    </intent>
+    <package android:name="com.tencent.mm" />
+    <package android:name="com.tencent.mobileqq" />
+    <package android:name="com.tencent.wework" />
+    <package android:name="com.alibaba.android.rimet" />
+    <package android:name="com.ss.android.lark" />
+    <package android:name="com.android.mms" />
+    <package android:name="com.google.android.apps.messaging" />
+  </queries>
+</manifest>

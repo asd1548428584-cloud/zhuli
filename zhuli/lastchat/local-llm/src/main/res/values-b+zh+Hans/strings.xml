@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="local_model_downloading">正在下载本地模型…</string>
+</resources>
