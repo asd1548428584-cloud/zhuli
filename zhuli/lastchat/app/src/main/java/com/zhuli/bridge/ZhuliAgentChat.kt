@@ -114,7 +114,8 @@ object ZhuliAgentChat {
                 candidates.first().id,
             )
         }
-        val outcome = runCatching { ZhuliAgentRuntime.approve(task.id, allow) }
+        // 把用户当时看到的那条调用指纹一并传下去：参数中途变了就自动失效。
+        val outcome = runCatching { ZhuliAgentRuntime.approve(task.id, allow, task.pendingApproval?.fingerprint) }
             .onFailure { Log.w("zhuli.chat", "approve failed", it) }
             .getOrNull() ?: return Reply("这一步没能执行，具体原因在任务页里。", task.id)
         return toReply(outcome)

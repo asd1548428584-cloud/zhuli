@@ -31,31 +31,8 @@ class CloudModelProvider(
     )
 
     override suspend fun complete(request: ModelRequest): ModelResponse {
-        val messages = JSONArray()
-        for (m in request.messages) {
-            val o = JSONObject().put("role", when (m.role) {
-                Role.SYSTEM -> "system"
-                Role.USER -> "user"
-                Role.ASSISTANT -> "assistant"
-                Role.TOOL -> "tool"
-            }).put("content", m.content)
-            if (m.role == Role.TOOL && m.toolCallId.isNotBlank()) {
-                o.put("tool_call_id", m.toolCallId)
-            }
-            if (m.toolCalls.isNotEmpty()) {
-                val calls = JSONArray()
-                for (c in m.toolCalls) {
-                    calls.put(
-                        JSONObject()
-                            .put("id", c.id)
-                            .put("type", "function")
-                            .put("function", JSONObject().put("name", c.name).put("arguments", c.arguments))
-                    )
-                }
-                o.put("tool_calls", calls)
-            }
-            messages.put(o)
-        }
+        // 批次 B：三家 Provider 共用一套中立消息 → OpenAI 格式转换，工具调用与结果按 ID 配对。
+        val messages = ProviderMessageFormat.openAi(request.messages)
         val toolsJson = if (request.tools.isEmpty()) "" else
             JSONArray(request.tools.map { it.toOpenAiJson() }).toString()
 

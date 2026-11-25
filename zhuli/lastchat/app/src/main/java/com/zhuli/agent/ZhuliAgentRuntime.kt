@@ -36,6 +36,8 @@ object ZhuliAgentRuntime : KoinComponent {
     private lateinit var _memory: MemoryRepo
     private lateinit var _tools: ToolRegistry
     private lateinit var _router: ModelRouter
+    /** 批次 B：同一个进程只用一个 loop —— 授权、并发锁、取消标志都挂在它上面。 */
+    private lateinit var _loop: AgentLoop
 
     val store: AgentStore get() = _store
     val memory: MemoryRepo get() = _memory
@@ -62,6 +64,10 @@ object ZhuliAgentRuntime : KoinComponent {
                 ),
                 onEvent = { msg -> com.zhuli.core.ZhuliLog.i("zhuli.agent", msg) },
             )
+            _loop = AgentLoop(
+                router = _router, tools = _tools, store = _store, policy = PolicyEngine(),
+                onEvent = { msg -> com.zhuli.core.ZhuliLog.i("zhuli.agent", msg) },
+            )
             // 上次进程没跑完的任务不能留在 RUNNING —— 恢复时从 PAUSED 接着跑
             _store.markOrphansPaused(System.currentTimeMillis())
             // 执行到一半的工具记录一律判「结果未知」，避免恢复后重复产生副作用
@@ -74,13 +80,8 @@ object ZhuliAgentRuntime : KoinComponent {
         }
     }
 
-    fun loop(): AgentLoop = AgentLoop(
-        router = _router,
-        tools = _tools,
-        store = _store,
-        policy = PolicyEngine(),
-        onEvent = { msg -> com.zhuli.core.ZhuliLog.i("zhuli.agent", msg) },
-    )
+    /** UI 取用的是同一个实例，不再每次 new 出一个没有授权/并发状态的空壳。 */
+    fun loop(): AgentLoop = _loop
 
     /**
      * 发起任务。
@@ -91,9 +92,19 @@ object ZhuliAgentRuntime : KoinComponent {
      *   任务整体只在本机跑。没配云端 Key 不算「隐私要求」，那种情况交给路由器自然失败再降级，
      *   否则用户没配 Key 时会得到一句莫名其妙的「只允许本机推理」。
      */
-    suspend fun start(goal: String, origin: String = "chat", localOnly: Boolean = false) = withContext(Dispatchers.IO) {
+    suspend fun start(
+        goal: String,
+        origin: String = "chat",
+        localOnly: Boolean = false,
+        sessionId: String = "",
+    ) = withContext(Dispatchers.IO) {
         check(initialized) { "ZhuliAgentRuntime 未初始化，请先 init(context)" }
-        loop().start(goal, origin, localOnly = localOnly || privacyDemandsLocal(goal))
+        // 没显式给会话 ID 时用固定的默认会话：同一聊天页连发两条任务必须串行，
+        // 否则两个循环会同时写同一任务的步骤和状态。
+        loop().start(
+            goal, origin, localOnly = localOnly || privacyDemandsLocal(goal),
+            sessionId = sessionId.ifBlank { "default" },
+        )
     }
 
     private fun privacyDemandsLocal(goal: String): Boolean = try {
@@ -107,9 +118,20 @@ object ZhuliAgentRuntime : KoinComponent {
         true
     }
 
-    suspend fun approve(taskId: String, allow: Boolean) = withContext(Dispatchers.IO) {
+    suspend fun approve(taskId: String, allow: Boolean, fingerprint: String? = null) = withContext(Dispatchers.IO) {
         check(initialized) { "ZhuliAgentRuntime 未初始化，请先 init(context)" }
-        loop().approve(taskId, allow)
+        loop().approve(taskId, allow, fingerprint)
+    }
+
+    /** 取消/暂停走同一个实例：状态落库 + 协作标志 + 协程取消。 */
+    fun cancel(taskId: String, reason: String = "用户取消了任务"): AgentTask? = loop().cancel(taskId, reason)
+
+    fun pause(taskId: String): AgentTask? = loop().pause(taskId)
+
+    /** 暂停后继续：从原任务的正确位置恢复，不重新创建任务。 */
+    suspend fun resume(taskId: String) = withContext(Dispatchers.IO) {
+        check(initialized) { "ZhuliAgentRuntime 未初始化，请先 init(context)" }
+        loop().run(taskId)
     }
 
     fun describeBackends(): String = if (initialized) _router.describe() else "（未初始化）"

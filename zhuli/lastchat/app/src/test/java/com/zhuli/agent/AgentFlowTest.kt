@@ -172,7 +172,8 @@ class AgentFlowTest {
         val s = loop.start("取消测试") as RunOutcome.Suspended
         loop.cancel(s.task.id)
         val after = loop.run(s.task.id)
-        assertTrue(after is RunOutcome.Completed)
-        assertEquals(TaskStatus.CANCELLED, (after as RunOutcome.Completed).task.status)
+        // 批次 B：取消是独立结局，不能再伪装成"已完成"
+        assertTrue(after is RunOutcome.Cancelled)
+        assertEquals(TaskStatus.CANCELLED, (after as RunOutcome.Cancelled).task.status)
     }
 }

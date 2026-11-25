@@ -28,6 +28,20 @@ class SqlAgentStore(private val db: Db) : AgentStore {
         db.writableDatabase.update(Db.TABLE_TASK, cv, "${Db.COL_T_ID}=?", arrayOf(task.id))
     }
 
+    override fun transition(id: String, from: TaskStatus, to: TaskStatus, now: Long): Boolean {
+        if (!from.canMoveTo(to)) return false
+        val cv = ContentValues().apply {
+            put(Db.COL_T_STATUS, to.name)
+            put(Db.COL_T_UPDATED, now)
+        }
+        val n = db.writableDatabase.update(
+            Db.TABLE_TASK, cv,
+            "${Db.COL_T_ID}=? AND ${Db.COL_T_STATUS}=?",
+            arrayOf(id, from.name),
+        )
+        return n > 0
+    }
+
     override fun appendStep(step: AgentStep): AgentStep {
         val sql = db.writableDatabase
         sql.beginTransaction()
@@ -85,27 +99,31 @@ class SqlAgentStore(private val db: Db) : AgentStore {
     )
 
     override fun active(): List<AgentTask> = list(
-        "WHERE ${Db.COL_T_STATUS} IN ('PENDING','RUNNING','WAITING_APPROVAL','PAUSED') ORDER BY ${Db.COL_T_CREATED} DESC",
+        "WHERE ${Db.COL_T_STATUS} IN ('PENDING','RUNNING','WAITING_APPROVAL','PAUSED','CANCELLING') ORDER BY ${Db.COL_T_CREATED} DESC",
         emptyArray(),
     )
 
     override fun findActiveByDedupeKey(key: String, since: Long): AgentTask? = first(
-        "${Db.COL_T_DEDUPE}=? AND ${Db.COL_T_CREATED}>=? AND ${Db.COL_T_STATUS} IN ('PENDING','RUNNING','WAITING_APPROVAL','PAUSED') ORDER BY ${Db.COL_T_CREATED} DESC LIMIT 1",
+        "${Db.COL_T_DEDUPE}=? AND ${Db.COL_T_CREATED}>=? AND ${Db.COL_T_STATUS} IN ('PENDING','RUNNING','WAITING_APPROVAL','PAUSED','CANCELLING') ORDER BY ${Db.COL_T_CREATED} DESC LIMIT 1",
         arrayOf(key, since.toString()),
     )
 
     override fun markOrphansPaused(now: Long): Int {
         val sql = db.writableDatabase
-        val before = sql.rawQuery(
-            "SELECT COUNT(*) FROM ${Db.TABLE_TASK} WHERE ${Db.COL_T_STATUS}='RUNNING'", null
-        ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
-        if (before == 0) return 0
-        val cv = ContentValues().apply {
+        // RUNNING 的孤儿留上下文等用户继续；CANCELLING 的孤儿说明进程在取消中途死了，
+        // 不能复活成 PAUSED —— 用户已经明确取消过，直接落 CANCELLED。
+        val cvPaused = ContentValues().apply {
             put(Db.COL_T_STATUS, TaskStatus.PAUSED.name)
             put(Db.COL_T_UPDATED, now)
         }
-        sql.update(Db.TABLE_TASK, cv, "${Db.COL_T_STATUS}='RUNNING'", null)
-        return before
+        val nPaused = sql.update(Db.TABLE_TASK, cvPaused, "${Db.COL_T_STATUS}='RUNNING'", null)
+        val cvCancelled = ContentValues().apply {
+            put(Db.COL_T_STATUS, TaskStatus.CANCELLED.name)
+            put(Db.COL_T_UPDATED, now)
+            put(Db.COL_T_FINISHED, now)
+        }
+        sql.update(Db.TABLE_TASK, cvCancelled, "${Db.COL_T_STATUS}='CANCELLING'", null)
+        return nPaused
     }
 
     // ---------- v16：工具执行记录 ----------
@@ -204,29 +222,54 @@ class SqlAgentStore(private val db: Db) : AgentStore {
         put(Db.COL_T_FINISHED, finishedAt)
         put(Db.COL_T_RESULT, result)
         put(Db.COL_T_ERROR, error)
-        put(Db.COL_T_PENDING, CallCodec.encode(listOfNotNull(pendingCall)))
+        // v16 的 pending_call 列现在放 TaskContext 信封；旧行是 ToolCall 数组，Codec 两种都认。
+        // 向后兼容：只设置了 pendingCall（没设置信封）的旧调用方，仍要能原样读回。
+        val effectiveApproval = pendingApproval ?: pendingCall?.let { call ->
+            TaskContextCodec.newApproval(
+                id, sessionId, call, Risk.of(pendingRisk.ifBlank { Risk.WRITE_LOCAL.name }),
+                createdAt,
+            )
+        }
+        put(
+            Db.COL_T_PENDING,
+            TaskContextCodec.encode(
+                TaskContext(
+                    sessionId = sessionId,
+                    phase = phase,
+                    approval = effectiveApproval,
+                    cancelReason = cancelReason,
+                )
+            )
+        )
         put(Db.COL_T_RISK, pendingRisk)
         put(Db.COL_T_DEDUPE, dedupeKey)
         put(Db.COL_T_ORIGIN, origin)
         put(Db.COL_T_LOCAL, if (localOnly) 1 else 0)
     }
 
-    private fun readTask(c: Cursor) = AgentTask(
-        id = c.str(Db.COL_T_ID),
-        goal = c.str(Db.COL_T_GOAL),
-        status = runCatching { TaskStatus.valueOf(c.str(Db.COL_T_STATUS)) }.getOrDefault(TaskStatus.PAUSED),
-        createdAt = c.getLong(c.getColumnIndexOrThrow(Db.COL_T_CREATED)),
-        updatedAt = c.getLong(c.getColumnIndexOrThrow(Db.COL_T_UPDATED)),
-        finishedAt = c.getLong(c.getColumnIndexOrThrow(Db.COL_T_FINISHED)),
-        result = c.str(Db.COL_T_RESULT),
-        error = c.str(Db.COL_T_ERROR),
-        pendingCall = CallCodec.decode(c.str(Db.COL_T_PENDING)).firstOrNull(),
-        pendingRisk = c.str(Db.COL_T_RISK),
-        dedupeKey = c.str(Db.COL_T_DEDUPE),
-        origin = c.str(Db.COL_T_ORIGIN),
-        stepCount = c.getInt(c.getColumnIndexOrThrow(Db.COL_T_STEPS)),
-        localOnly = c.getInt(c.getColumnIndexOrThrow(Db.COL_T_LOCAL)) != 0,
-    )
+    private fun readTask(c: Cursor): AgentTask {
+        val ctx = TaskContextCodec.decode(c.str(Db.COL_T_PENDING), c.str(Db.COL_T_ID))
+        return AgentTask(
+            id = c.str(Db.COL_T_ID),
+            goal = c.str(Db.COL_T_GOAL),
+            status = runCatching { TaskStatus.valueOf(c.str(Db.COL_T_STATUS)) }.getOrDefault(TaskStatus.PAUSED),
+            createdAt = c.getLong(c.getColumnIndexOrThrow(Db.COL_T_CREATED)),
+            updatedAt = c.getLong(c.getColumnIndexOrThrow(Db.COL_T_UPDATED)),
+            finishedAt = c.getLong(c.getColumnIndexOrThrow(Db.COL_T_FINISHED)),
+            result = c.str(Db.COL_T_RESULT),
+            error = c.str(Db.COL_T_ERROR),
+            pendingCall = ctx.approval?.call ?: CallCodec.decode(c.str(Db.COL_T_PENDING)).firstOrNull(),
+            pendingRisk = c.str(Db.COL_T_RISK),
+            pendingApproval = ctx.approval,
+            sessionId = ctx.sessionId,
+            phase = ctx.phase,
+            cancelReason = ctx.cancelReason,
+            dedupeKey = c.str(Db.COL_T_DEDUPE),
+            origin = c.str(Db.COL_T_ORIGIN),
+            stepCount = c.getInt(c.getColumnIndexOrThrow(Db.COL_T_STEPS)),
+            localOnly = c.getInt(c.getColumnIndexOrThrow(Db.COL_T_LOCAL)) != 0,
+        )
+    }
 
     private fun readExec(c: Cursor) = ToolExecution(
         executionId = c.str(Db.COL_TX_ID),

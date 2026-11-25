@@ -26,6 +26,9 @@ enum class TaskStatus {
     /** 用户主动暂停，或进程重启后把「跑一半」的标成暂停，等下一次继续 */
     PAUSED,
 
+    /** 用户点了取消，但正在执行的工具还没安全停下（批次 B：暂停与取消必须分开） */
+    CANCELLING,
+
     /** 正常完成，result 里有最终答复 */
     DONE,
 
@@ -37,11 +40,16 @@ enum class TaskStatus {
 
     val terminal: Boolean get() = this == DONE || this == FAILED || this == CANCELLED
 
+    /**
+     * 允许的状态转换（批次 B：这是唯一判定表，[AgentLoop.move] 与存储层 CAS 都用它）。
+     * 终态不可再迁出；CANCELLING 只能落到 CANCELLED（或异常落 FAILED），不能"取消后又完成"。
+     */
     fun canMoveTo(next: TaskStatus): Boolean = when (this) {
-        PENDING -> next in setOf(RUNNING, CANCELLED, FAILED)
-        RUNNING -> next in setOf(WAITING_APPROVAL, PAUSED, DONE, FAILED, CANCELLED)
-        WAITING_APPROVAL -> next in setOf(RUNNING, PAUSED, CANCELLED, FAILED)
-        PAUSED -> next in setOf(RUNNING, CANCELLED, FAILED)
+        PENDING -> next in setOf(RUNNING, CANCELLING, CANCELLED, FAILED)
+        RUNNING -> next in setOf(WAITING_APPROVAL, PAUSED, CANCELLING, CANCELLED, DONE, FAILED)
+        WAITING_APPROVAL -> next in setOf(RUNNING, PAUSED, CANCELLING, CANCELLED, FAILED)
+        PAUSED -> next in setOf(RUNNING, CANCELLING, CANCELLED, FAILED)
+        CANCELLING -> next in setOf(CANCELLED, FAILED)
         DONE, FAILED, CANCELLED -> false
     }
 }
@@ -92,6 +100,18 @@ data class AgentTask(
     val error: String = "",
     val pendingCall: ToolCall? = null,
     val pendingRisk: String = "",
+    /**
+     * 批次 B：审批/恢复的完整上下文。与 [pendingCall] 同步维护，
+     * 但多了会话 ID、参数指纹、过期时间与该轮尚未执行的调用。
+     * 落库在 v16 已有的 pending_call 列里（[TaskContextCodec] 兼容旧格式）。
+     */
+    val pendingApproval: PendingApproval? = null,
+    /** 会话隔离键：同一会话的任务串行，不同会话可并行。 */
+    val sessionId: String = "",
+    /** 唯一阶段来源：CREATED / MODEL_DECIDE / TOOL_EXEC / AWAIT_APPROVAL / FINISH。 */
+    val phase: String = "CREATED",
+    /** 取消原因（批次 B：与失败原因 error 分开，便于审计）。 */
+    val cancelReason: String = "",
     /** 去重键：目标归一化后的哈希。同一键在窗口内只允许一个活跃任务 */
     val dedupeKey: String = "",
     /** 来源：chat / brief / manual */
@@ -153,6 +173,14 @@ interface AgentStore {
     fun create(task: AgentTask): AgentTask
     fun get(id: String): AgentTask?
     fun update(task: AgentTask)
+
+    /**
+     * 原子状态迁移：仅当当前状态等于 [from] 时才写入 [to]。
+     * 返回 false 表示被别的执行路径抢先改过（重复审批 / 并发取消），调用方必须放弃本次动作。
+     * 这是"任务状态唯一可靠来源"在并发下的保证。
+     */
+    fun transition(id: String, from: TaskStatus, to: TaskStatus, now: Long): Boolean
+
     fun appendStep(step: AgentStep): AgentStep
     fun steps(taskId: String): List<AgentStep>
     fun stepsCount(taskId: String): Int
@@ -204,6 +232,14 @@ class InMemoryAgentStore : AgentStore {
     }
 
     @Synchronized
+    override fun transition(id: String, from: TaskStatus, to: TaskStatus, now: Long): Boolean {
+        val t = tasks[id] ?: return false
+        if (t.status != from || !from.canMoveTo(to)) return false
+        tasks[id] = t.copy(status = to, updatedAt = now)
+        return true
+    }
+
+    @Synchronized
     override fun appendStep(step: AgentStep): AgentStep {
         val withId = step.copy(id = stepId.incrementAndGet())
         stepMap.getOrPut(step.taskId) { ArrayList() }.add(withId)
@@ -237,6 +273,9 @@ class InMemoryAgentStore : AgentStore {
             if (t.status == TaskStatus.RUNNING) {
                 tasks[id] = t.copy(status = TaskStatus.PAUSED, updatedAt = now)
                 n++
+            } else if (t.status == TaskStatus.CANCELLING) {
+                // 进程在取消中途死了：用户已明确取消，不能复活成 PAUSED
+                tasks[id] = t.copy(status = TaskStatus.CANCELLED, updatedAt = now, finishedAt = now)
             }
         }
         return n

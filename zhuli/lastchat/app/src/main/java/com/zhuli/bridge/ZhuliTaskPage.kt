@@ -144,7 +144,7 @@ fun ZhuliTaskScreen() {
                             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                                 OutlinedButton(onClick = {
                                     scope.launch {
-                                        val r = ZhuliAgentRuntime.approve(current.id, true)
+                                        val r = ZhuliAgentRuntime.approve(current.id, true, current.pendingApproval?.fingerprint)
                                         message = describe(r)
                                         selected = ZhuliAgentRuntime.store.get(current.id)
                                         tick++
@@ -152,7 +152,7 @@ fun ZhuliTaskScreen() {
                                 }) { Text("允许") }
                                 TextButton(onClick = {
                                     scope.launch {
-                                        val r = ZhuliAgentRuntime.approve(current.id, false)
+                                        val r = ZhuliAgentRuntime.approve(current.id, false, current.pendingApproval?.fingerprint)
                                         message = describe(r)
                                         selected = ZhuliAgentRuntime.store.get(current.id)
                                         tick++
@@ -163,16 +163,25 @@ fun ZhuliTaskScreen() {
                         if (current.status.name == "PAUSED" || current.status.name == "PENDING") {
                             TextButton(onClick = {
                                 scope.launch {
-                                    val r = ZhuliAgentRuntime.loop().run(current.id)
+                                    val r = ZhuliAgentRuntime.resume(current.id)
                                     message = describe(r)
                                     selected = ZhuliAgentRuntime.store.get(current.id)
                                     tick++
                                 }
                             }, modifier = Modifier.padding(horizontal = 16.dp)) { Text("继续执行") }
                         }
+                        if (current.status.name in setOf("RUNNING", "WAITING_APPROVAL", "CANCELLING")) {
+                            TextButton(onClick = {
+                                scope.launch {
+                                    ZhuliAgentRuntime.pause(current.id)
+                                    selected = ZhuliAgentRuntime.store.get(current.id)
+                                    tick++
+                                }
+                            }, modifier = Modifier.padding(horizontal = 16.dp)) { Text("暂停任务") }
+                        }
                         TextButton(onClick = {
                             scope.launch {
-                                ZhuliAgentRuntime.loop().cancel(current.id)
+                                ZhuliAgentRuntime.cancel(current.id)
                                 selected = ZhuliAgentRuntime.store.get(current.id)
                                 tick++
                             }

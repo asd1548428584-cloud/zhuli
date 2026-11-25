@@ -114,15 +114,36 @@ class PolicyEngine(
 
     private var roundEndsAt = 0L
     private val granted = HashSet<String>()
+    /** 批次 B：用户逐次批准过的调用指纹 → 授权到期时间。参数一变指纹就对不上。 */
+    private val authorized = HashMap<String, Long>()
 
     fun beginRound(now: Long = clock()) {
         roundEndsAt = now + ROUND_TTL_MS
         granted.clear()
+        authorized.clear()
     }
 
     fun endRound() {
         roundEndsAt = 0L
         granted.clear()
+        authorized.clear()
+    }
+
+    /** 只授权这一次具体调用（不是整个 op），且只在有效轮次内生效。 */
+    fun authorize(fingerprint: String, now: Long = clock()): Boolean {
+        if (!roundActive(now)) return false
+        authorized[fingerprint] = roundEndsAt
+        return true
+    }
+
+    /** 高风险工具执行前的最后一道闸：没有对应指纹的批准就不许执行。 */
+    fun isAuthorized(fingerprint: String, now: Long = clock()): Boolean {
+        val until = authorized[fingerprint] ?: return false
+        if (now >= until || now >= roundEndsAt) {
+            authorized.remove(fingerprint)
+            return false
+        }
+        return true
     }
 
     fun roundActive(now: Long = clock()): Boolean = roundEndsAt > 0 && now < roundEndsAt
