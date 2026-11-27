@@ -24,6 +24,27 @@
 >
 > v3 **撤销** v2 的两个结论：① §5.12 的"WAL 下 checkpoint 后继续"（在 helper 事务内不可行，改为断言拒绝）；
 > ② §14.1 的"`onUpgrade` 内分批提交"（Android 嵌套事务不会真的 COMMIT，改为"分批处理、单事务提交"）。
+>
+> **修订 v4（2026-11-27）**：按终审意见修复 **3 项 P0 + 7 项 P1**，并完成 6 项全文一致性检查。
+> 基线是 v3（提交 `664b818`，3,638 行）。**不改** C0.2 架构、**不改** D-6/D-7、**不动**任何生产代码
+> （`app/src` 零改动，`DB_VERSION` 仍为 16）。GitHub 上的 v3 合订本**保留不动**，v4 另存为新文件。
+> 逐项关闭表（问题编号 / v3 问题 / v4 修改位置 / 修改内容 / 验证方式 / 状态）、A-1–A-7 核对状态、
+> 测试数量重算与 C1-B1 开工门槛，全部见 **§20**。
+>
+> **v3 → v4 的数字变化（三种口径，不可混用）**：
+>
+> | 口径 | v3 | v4 | 变化原因 |
+> |---|---|---|---|
+> | **逻辑用例数**（编号数） | 75 | **90** | +15：`T-M47`–`T-M52`（6）、`T-S25`–`T-S31`（7）、`T-D50`（1，三档执行）、`T-N06`（1） |
+> | **执行次数**（Gradle XML `tests`） | 126 | **140** | 双跑从 51 条降到 **48** 条（`T-S21`–`T-S24` 各自固定一档，不再双跑）；单跑 41 条 / 41 次 + 三档 1 条 / 3 次（`T-D50`） |
+> | **目标 XML `tests`** | 457 | **471** | 331 基线 + 140 次执行 |
+> | 测试代码预算 | ≤2,800 行 | **≤3,300 行** | 15 条新用例的必然成本（§8.4） |
+> | 修改生产文件 | 4 | **4**（不变） | v4 只改文档 |
+>
+> v4 **撤销** v3 的四个结论：① "先备份、后检查 `journal_mode`"（顺序错，改为**备份前拒绝**）；
+> ② `sqlite_sequence` 用 `INSERT OR REPLACE`（该表 `name` 无唯一约束，REPLACE 退化为 INSERT，改为 **UPDATE → `changes()` → INSERT**）；
+> ③ `return finish(TRIGGER)` 之后才清理（改为**清理并验证残留之后**才可能返回 TRIGGER）；
+> ④ `expire()` 写路径（C1-B 不实现，改归 C2，见 §7.2）。
 
 ---
 
@@ -31,9 +52,9 @@
 
 ### 0.1 一句话
 
-C1-B 用 **7 个新文件 + 4 个改动文件**（生产），把 C0.2 的 7 张表、v16→v17 迁移、三档 FTS 与唯一写入口落地，并用 **75 条新用例（逻辑）/ 126 次执行 + 10 项设备验收**兜住；`MemoryRepo` 的 27 个公开签名一个不改。
+C1-B 用 **7 个新文件 + 4 个改动文件**（生产），把 C0.2 的 7 张表、v16→v17 迁移、三档 FTS 与唯一写入口落地，并用 **90 条新用例（逻辑）/ 140 次执行 + 10 项设备验收**兜住；`MemoryRepo` 的 27 个公开签名一个不改。
 
-> **为什么是两个数**：`75` 是编号数（一条用例一个编号，便于追溯 C0.2 / D-6 / D-7 / v3）；`126` 是 Gradle 实际执行数（其中 51 条要在 `TRIGGER` 与 `APP_SYNC` 两档各跑一遍）。v2 把这两个数混成了"65"，又用 331+65=396 当目标，这是 v3 要修的 P1-6（§10.11 有逐组明细）。
+> **为什么是两个数**：`90` 是编号数（一条用例一个编号，便于追溯 C0.2 / D-6 / D-7 / v3 / v4）；`140` 是 Gradle 实际执行数（其中 48 条要在 `TRIGGER` 与 `APP_SYNC` 两档各跑一遍，另 1 条在三档各跑一遍）。v2 曾把逻辑数当执行数（331+65=396），v3 修正为 457，v4 又按"每条用例实际参数化几次"重算为 471（§10.11 有逐组明细，§20.5 有三口径对照）。
 
 > v1 的"7 + 2"是 D-6/D-7 决定前的口径。D-6 要求扩展 `FactStatus`（`MemoryTypes.kt`）并让 `MemoryRanker.conflicts` 支持 CANDIDATE，故生产改动文件由 2 个增至 4 个：`InboxDatabase.kt`（D-7 拆分）、`MemoryRepo.kt`（投影重写）、`MemoryTypes.kt`（状态扩展）、`MemoryRanker.kt`（冲突过滤）。65 = 原 47 + D-6 的 12 + D-7 的 6。
 
@@ -94,8 +115,9 @@ v2 把 HEAD 写成 `6a66c1e`（C1-A 交付），那是 v1/v2 写作时的 HEAD�
 | `BASE_C1A` | **`6a66c1e`** | C1-A 交付（`test(c1a): verify FTS4 + trigger sync`），+18 例 | 331 例基线的另一半 |
 | `BASE_C1B_V1` | **`90088f8`** | C1-B 方案 v1（47 条新增、378 目标） | 历史对照 |
 | `BASE_C1B_V2` | **`ba2c2f0`** | C1-B 方案 v2（D-6/D-7 落实，65 条、396 目标） | 被 v3 修订的对象 |
-| **`BASE_IMPL`** | **v3 提交的哈希**（提交后产生） | **C1-B 开工基线** | `git diff BASE_IMPL..HEAD` 的起点 |
-| `HEAD_NOW` | `ba2c2f0`（v3 提交前） | 写作时的 HEAD | 只用于"v3 相对 v2 改了什么" |
+| `BASE_C1B_V3` | **`664b818`** | C1-B 方案 v3（3,638 行，75 条 / 126 次 / 457） | 被 v4 修订的对象；GitHub 合订本仍指向它 |
+| **`BASE_IMPL`** | **v4 提交的哈希**（提交后产生） | **C1-B 开工基线** | `git diff BASE_IMPL..HEAD` 的起点 |
+| `HEAD_NOW` | `664b818`（v4 提交前） | 写作时的 HEAD | 只用于"v4 相对 v3 改了什么" |
 
 **tag 的两个形态必须分清**（v2 在交付报告里把两者并列成"`202f2c5` / `394023c`"，容易误读为同一层级）：
 
@@ -112,12 +134,13 @@ v2 把 HEAD 写成 `6a66c1e`（C1-A 交付），那是 v1/v2 写作时的 HEAD�
 |---|---|---|
 | 分支 | `master` | `git rev-parse --abbrev-ref HEAD` |
 | 工作区 | 干净，只有未跟踪的 `Temp/` | `git status --porcelain` → `?? Temp/` |
-| 线性历史 | C0 → C0.1 → C0.2 → C1-A → C1-B v1 → C1-B v2 → C1-B v3，无 merge、无 amend、无 rebase | `git log --graph --oneline` |
+| 线性历史 | C0 → C0.1 → C0.2 → C1-A → C1-B v1 → v2 → v3 → v4，无 merge、无 amend、无 rebase | `git log --graph --oneline` |
 | 已推送 | **否**（本地仓库） | `git status -sb` 无 upstream |
 
-提交链（近 7 个，v3 写作时）：
+提交链（近 8 个，v4 写作时）：
 
 ```
+664b818 docs(c1b): v3 targeted revision, 7 P0 + 8 P1 + 5 acceptance + 12 self-check fixes
 ba2c2f0 docs(c1b): apply D-6/D-7 decisions to the implementation plan
 90088f8 docs(c1b): implementation plan for memory infrastructure, 5 sub-stages + 10 code conflicts
 6a66c1e test(c1a): verify FTS4 + trigger sync on Android SQLiteDatabase
@@ -254,11 +277,12 @@ vectorCount / enqueueAllActive / vectorText / hybridSearch(suspend)
 | `C1B_D6_CASES` | **12**（`T-X01`–`T-X12`） | 逻辑 |
 | `C1B_D7_CASES` | **6**（`T-M40`–`T-M45`） | 逻辑 |
 | `C1B_V3_CASES` | **10**（`T-M46` / `T-S21`–`T-S24` / `T-N01`–`T-N05`） | 逻辑 |
-| **`C1B_LOGICAL_CASES`** | **75** = 47 + 12 + 6 + 10 | **逻辑** |
-| **`C1B_EXECUTED`** | **126**（逐组见 §10.11） | **执行** |
-| **`C1B_TARGET_TESTS`** | ≥ 331 + 126 = **457** | **XML** |
+| `C1B_V4_CASES` | **15**（`T-M47`–`T-M52` / `T-S25`–`T-S31` / `T-D50` / `T-N06`） | 逻辑 |
+| **`C1B_LOGICAL_CASES`** | **90** = 47（C0.2 架构）+ 12（D-6）+ 6（D-7）+ 10（v3）+ 15（v4） | **逻辑** |
+| **`C1B_EXECUTED`** | **140**（双跑 48 条 = 96 次；单跑 41 条 = 41 次；三档 1 条 = 3 次） | **执行** |
+| **`C1B_TARGET_TESTS`** | ≥ 331 + 140 = **471** | **XML** |
 
-> **为什么目标从 396 变成 457**：v2 的 396 = 331 + 65，把"逻辑用例数 65"直接加到了"XML 计数 331"上。但 65 条里有 51 条要双跑（`TRIGGER` + `APP_SYNC`），实际新增执行是 126 次。这不是范围扩张，是**口径修正**——如果只要求"XML 增加 65"，那么双跑就变成了"同一批用例跑两遍但只算一遍"，CI 会显示 396 而实际执行 457，门禁失去意义。
+> **为什么目标从 396 → 457 → 471**：v2 的 396 = 331 + 65，把"逻辑用例数 65"直接加到了"XML 计数 331"上。v3 修正为 457（331 + 126），但把 `T-S21`–`T-S24` 这 4 条"各自固定一档"的用例也算成了双跑。v4 逐条回看参数化方式：双跑 48 条、单跑 41 条、三档 1 条（3 次），实际新增执行 140 次。这不是范围扩张，是**口径修正**——门禁数字必须等于 Gradle 真实执行数，否则 CI 会显示一个数、实际跑另一个数。
 >
 > **为什么不用 C0.2 的 `313 + 54 = 367`**：313 是 C1-A **之前**的数。C1-A 已交付 18 次执行（G 组 7 条 × 2 个 `SQLiteMode` + 环境诊断 + 负向对照按类计），重复计入会虚增要求。
 
@@ -309,7 +333,7 @@ const val UB_SQL = "valid_until"          // 不设 time_confidence 门槛
 |---|---|---|---|
 | 1 | `valid_from` 绝不因"不知道"写 `now` | `MemoryStore.insert` 的 `now` 参数**不参与** `valid_from`；只有显式 `worldFrom` 才写 | 伪造事实起点 |
 | 2 | 纠正**继承** `valid_from` 与 `time_confidence` | `MemoryStore.correct()` 从 `old` 复制，**不**用 `now` | 一次纠正把系统时间洗成用户时间（C0.2 §4.2 注） |
-| 3 | 替代/过期**必须**同时写 `invalidated_at`，且此后不再改 | `MemoryStore.supersede()` / `expire()`；`softDelete` 只在 `=0` 时写 | 信念线与世界线混用 |
+| 3 | 替代/过期**必须**同时写 `invalidated_at`，且此后不再改 | 改 `status` 到 `SUPERSEDED` / `EXPIRED` / `DELETED` 的语句（`insert` 的 R4a/R7、`correct`、`resolveConflict`、`softDelete`）；`softDelete` 只在 `=0` 时写 | 信念线与世界线混用 |
 | 4 | 迁移行 `time_confidence` **一律 `NONE`**、`valid_until` **一律 0** | `MemoryMigrator` 的常量，不按条件分支 | 伪造时间精度（C0.2 缺陷 #1） |
 
 `CURRENT` / `WORLD_ASOF` / `BELIEF_ASOF` 三个谓词（C0.2 §4.3，逐字实现）：
@@ -746,17 +770,19 @@ S6  zhuli_memory_entity          （无外键）
 S7  普通索引 × 12                （见 §4.5.1 的 #1–#5、#7、#9、#11–#15）
 S8  zhuli_memory_fts（虚拟表）    ← 仅 ftsMode != NONE
 S9  触发器 × 3                    ← 仅 ftsMode == TRIGGER
-S10 UNIQUE INDEX idx_mi_dedupe    ← **迁移时最后建**；运行时建表可随 S7
-S11 UNIQUE INDEX idx_mev_primary  ← 随 S7
-S12 UNIQUE INDEX idx_ms_dedupe    ← 随 S7
+S10 三个唯一索引（**迁移路径**，数据迁完之后一次性建）：
+      idx_ms_dedupe → idx_mev_primary → idx_mi_dedupe
+    （**运行时路径** `withUnique=true` 时随 S7 一起建，因为表是空的）
 ---
 合计：6 张表 + 12 普通 + 3 唯一 = 15 个显式索引
 另有 4 个自动索引由 S1/S3/S4/S5/S6 的表内 PK/UNIQUE 自动产生（§4.5.2）
 ```
 
+> **S10 是 v4 修的一个真缺陷（P0-1）**：v3 的 `createAll(withUnique=false)` 会跳过**全部三个**唯一索引，但迁移流程只在第 10 步补建了 `idx_mi_dedupe`，`idx_ms_dedupe` 与 `idx_mev_primary` **从未创建**。结果是"升级库缺两个唯一约束、新建库有"，两条路径结构不一致，且重复证据/双主来源可以静默写入。v4 把第 10 步改成"预检三个 → 按顺序建三个 → 逐条验证"，见 §5.2.1。
+
 **为什么不用外键**：C0.2 的 DDL 全部没有 `FOREIGN KEY`。这不是省事：`ON DELETE CASCADE` 会在硬删时跳过 revision 记录（审计丢失），而 `PRAGMA foreign_keys` 在 Android 上默认关闭、需要每连接开。C1 用**应用层顺序 + `selfCheck`** 保证一致性（C0.2 §6.3 的子→父顺序）。
 
-**为什么 `idx_mi_dedupe` 在迁移时最后建**：C0.2 §8.9 第 10 步。先建会在逐行插入时撞上历史重复，整批失败。运行时（`createAll` 的 `withUnique=true` 分支）可以一次建好，因为那时表是空的。
+**为什么三个唯一索引都在迁移时最后建**：C0.2 §8.9 第 10 步只点名了 `idx_mi_dedupe`（历史重复最多的一张），但同一理由适用于另外两个——`idx_ms_dedupe` 会在 `INSERT OR IGNORE` 之后才稳定，`idx_mev_primary` 要等 evidence 全部写完。先建会在逐行插入/回填阶段撞上中间态，整批失败；建之前必须显式预检历史重复（§5.2.1）。运行时（`createAll` 的 `withUnique=true` 分支）可以一次建好，因为那时表是空的。
 
 ### 4.5 索引与约束清单（15 个显式 + 4 个自动，P0-6 重写）
 
@@ -779,11 +805,11 @@ v2 的这张表有 15 行，但只写了名字和列，**没写"创建时机"、
 | 3 | `idx_mi_type_time` | item | 普通 | `(memory_type, status, valid_until, event_start)` | as-of / 过期扫描 | 随建表（S7） |
 | 4 | `idx_mi_observed` | item | 普通 | `(status, observed_at)` | `active()` 倒序、BELIEF_ASOF | 随建表（S7） |
 | 5 | `idx_mi_source` | item | 普通 | `(source_id)` | 主来源反查 | 随建表（S7） |
-| 6 | **`idx_mi_dedupe`** | item | **唯一（部分）** | `(dedupe_key) WHERE status IN ('ACTIVE','CANDIDATE')` | 防重复；**恢复时的主要冲突源** | **运行时随建表；迁移时最后建（S10）** |
+| 6 | **`idx_mi_dedupe`** | item | **唯一（部分）** | `(dedupe_key) WHERE status IN ('ACTIVE','CANDIDATE')` | 防重复；**恢复时的主要冲突源** | 运行时随建表（S10）；**迁移时最后建，且排在另两个之后**（§5.2.1） |
 | 7 | `idx_ms_ref` | source | 普通 | `(source_type, ref_table, ref_id)` | 回溯源 | 随建表（S7） |
-| 8 | **`idx_ms_dedupe`** | source | **唯一** | `(source_type, ref_table, ref_id, ref_sub_id, content_hash)` | 同一证据幂等 | 随建表（S11） |
+| 8 | **`idx_ms_dedupe`** | source | **唯一** | `(source_type, ref_table, ref_id, ref_sub_id, content_hash)` | 同一证据幂等 | 运行时随建表（S10）；**迁移时第 10 步**（§5.2.1） |
 | 9 | `idx_mev_source` | evidence | 普通 | `(source_id)` | 来源引用计数 / GC | 随建表（S7） |
-| 10 | **`idx_mev_primary`** | evidence | **唯一（部分）** | `(memory_id) WHERE role='PRIMARY'` | 一条记忆最多一个主来源 | 随建表（S11） |
+| 10 | **`idx_mev_primary`** | evidence | **唯一（部分）** | `(memory_id) WHERE role='PRIMARY'` | 一条记忆最多一个主来源 | 运行时随建表（S10）；**迁移时第 10 步**（§5.2.1） |
 | 11 | `idx_mr_from` | relation | 普通 | `(from_id, relation)` | 查"我替代了谁" | 随建表（S7） |
 | 12 | `idx_mr_to` | relation | 普通 | `(to_id, relation)` | WORLD_ASOF 的 `CORRECTS` 排除 | 随建表（S7） |
 | 13 | `idx_mrev_mem` | revision | 普通 | `(memory_id, revision_no)` | 历史 | 随建表（S7） |
@@ -799,6 +825,8 @@ v2 的这张表有 15 行，但只写了名字和列，**没写"创建时机"、
 | `idx_mev_primary` | **286** | `CREATE UNIQUE INDEX IF NOT EXISTS idx_mev_primary ON zhuli_memory_evidence(memory_id) WHERE role='PRIMARY';` |
 
 > 三个都是 `CREATE UNIQUE INDEX`，**不是**表内 `UNIQUE(...)` 子句。这个区别有实际后果：部分唯一索引（`WHERE`）只能用 `CREATE UNIQUE INDEX` 表达，表内约束做不到。所以拆分 `withUnique` 参数时，这三个必须跟着索引走，不能塞进 `CREATE TABLE`。
+>
+> **v3 的漏洞（P0-1）**：`withUnique=false` 跳过三个，迁移只补了一个。v4 的硬约束：**迁移路径必须建全部三个**，且建之前逐个预检（§5.2.1）；新建路径由 `withUnique=true` 建全部三个；两条路径的 `sqlite_master` 结果必须逐字一致（`T-M47` / `T-M49`）。
 
 #### 4.5.2 4 个自动索引（不可删、不出现在 `EXPECTED_INDEXES` 的 CREATE 清单里）
 
@@ -1055,8 +1083,8 @@ D-7 第 8 条要求的不是一个断言，而是**两条独立的防线**：
 |---|---|---|---|
 | 1 | 调用方 `db.writableDatabase` → `getDatabaseLocked()` 读 `PRAGMA user_version`，发现 `16 ≠ 17` | — | 读版本失败 → 异常，库不动 |
 | 2 | helper `db.beginTransaction()`（`BEGIN EXCLUSIVE`，delete 模式） | **T0 开始** | `BEGIN` 失败 → 异常，库不动 |
-| 3 | `onUpgrade` 第一行：`backupBeforeMigration(16)` 文件拷贝 | **是**（T0 内，**尚无任何写语句**） | 备份失败 → 记 `lastBackupError`，**继续迁移**（备份不是前置条件，现有语义） |
-| 4 | `PRAGMA journal_mode` 断言（§5.12） | 是 | 抛 → T0 回滚 → 库仍 v16 |
+| 3 | `onUpgrade` 第一行：`MigrationBackup.checkAndBackup(db, 16)`。**先读 `PRAGMA journal_mode` 并断言**，通过后才拷贝 `.db` 文件 | **是**（T0 内，**尚无任何写语句**） | 模式不支持 → **抛**（一个字节都不拷贝，迁移不开始）；拷贝本身失败 → 记 `lastBackupError`，**继续迁移**（备份不是前置条件，现有语义） |
+| 4 | `MemoryMigrator.migrate()` 第 0 步**再**断言一次 `journal_mode`（防御：未来若有人绕过 helper 直接调 `migrate`） | 是 | 抛 → T0 回滚 → 库仍 v16 |
 | 5 | `if (oldVersion < 15) { createCoreTablesV15; createFactTableV15 }` | 是 | 抛 → 回滚 |
 | 6 | `if (oldVersion < 17) { MemorySchema.createAll(withUnique=false); MemoryMigrator.migrate() }` | 是 | 抛 → 回滚 |
 | 7 | helper `db.setVersion(17)` | 是（**同一事务**） | 抛 → 回滚（版本号也回滚） |
@@ -1065,9 +1093,11 @@ D-7 第 8 条要求的不是一个断言，而是**两条独立的防线**：
 
 三点必须照此理解，否则会写出错的测试：
 
-1. **第 3 步是唯一合法的备份点**。`onUpgrade` 的第一条语句、T0 已开但未写——此时主库文件内容仍等于"上次提交后的完整状态"。一旦执行过任何 DDL/DML，rollback journal 模式下主库页已被就地改写，再拷就是"半新半旧"的混合文件。
+1. **第 3 步里的"拷贝"是唯一合法的备份点，但它前面必须先过 `journal_mode` 闸门**。`onUpgrade` 的第一条语句、T0 已开但未写——此时主库文件内容仍等于"上次提交后的完整状态"。一旦执行过任何 DDL/DML，rollback journal 模式下主库页已被就地改写，再拷就是"半新半旧"的混合文件。**而 WAL 模式下，主库文件本来就不等于完整状态**（已提交的页可能还在 `-wal` 里），所以必须先判模式、再决定要不要拷——这是 v3 顺序错的地方，v4 已改（P0-3，§5.12）。
 2. **第 7 步的版本号在事务内**。所以迁移失败时 `user_version` 不会留在 17，这是 `T-M08` / `T-M45` 断言的依据。
 3. **`onUpgrade` 里的 `db.beginTransaction()` 是纯嵌套**，不产生新的 BEGIN。现有 `began` 变量（失败则降级为"无事务"）在 T0 内**永远为 true**，保留它无害但也不再是保障；真正的事务保障来自 helper。
+
+> **第 3 步的两种失败必须分开处理**：`journal_mode` 不支持 → 抛异常，整个迁移中止；文件拷贝失败（磁盘满、无权限）→ 记录后继续。把前者降级成"备份失败但继续"，就等于在一个可能不完整的库上继续迁移——这正是 P0-3 要堵的洞。
 
 `MemoryMigrator.migrate()` **不自己开事务**，它假定被 `onUpgrade` 的 T0 包住。理由：C0.2 §8.9 的第 12 步（改名）与第 2 步（插数据）必须在同一事务，否则会出现"数据插了但表没改名"的半迁移。它也不得调用 `setTransactionSuccessful()`——那只属于最外层。
 
@@ -1084,7 +1114,7 @@ D-7 第 8 条要求的不是一个断言，而是**两条独立的防线**：
 
 | 步 | 动作 | 实现 | 失败行为 |
 |---|---|---|---|
-| 0 | 前置断言 | ① `journal_mode` 属于回滚日志族（`delete`/`truncate`/`persist`），**`wal` 直接拒绝**（§5.12）；② `newVersion == 17`；③ **`oldVersion` 在 `1..16`**（`0` 不该进这里，`>17` 是降级）；④ 源表存在性**按 `oldVersion` 分支判定**（见下） | 抛 → 回滚 |
+| 0 | 前置断言 | ① `journal_mode` 属于回滚日志族（`delete`/`truncate`/`persist`），**`wal` 直接拒绝**（§5.12；这是第二道闸门，第一道已在备份前）；② `newVersion == 17`；③ **`oldVersion` 在 `1..16`**（`0` 不该进这里，`>17` 是降级）；④ 源表存在性**按 `oldVersion` 分支判定**（见下） | 抛 → 回滚 |
 | 1 | 建 7 张表 + 12 个普通索引（**不含** 3 个唯一索引） | `MemorySchema.createAll(db, withUnique=false)` | 抛 → 回滚 |
 | 2 | 逐行迁移 item / source / evidence | `migrateRows()`，见 §5.3 | 单行失败：记 `failed++` 并**继续**；末尾 `failed>0` 即抛（§5.9） |
 | 3 | 替代链 → relation；断链清理 | `migrateSupersedeChain()` | 抛 → 回滚 |
@@ -1094,8 +1124,8 @@ D-7 第 8 条要求的不是一个断言，而是**两条独立的防线**：
 | 7 | 建 FTS4 虚拟表 | `MemorySchema.createFtsTable(db)` | 失败 → `ftsMode=NONE`，**不中止迁移** |
 | 8 | 一次性灌 FTS | `INSERT INTO … SELECT … WHERE status<>'DELETED'` | 失败 → `ftsMode=NONE` |
 | 9 | 建 3 个触发器 | `MemorySchema.createFtsTriggers(db)` | 失败 → `ftsMode=APP_SYNC`（探测决定） |
-| 10 | 建 `idx_mi_dedupe` | 建失败时打印前 5 个重复键（**只打印键的哈希前 8 位，不打印原文**） | 抛 → 回滚 |
-| 11 | 对齐 `sqlite_sequence` | `INSERT OR REPLACE INTO sqlite_sequence(name,seq) …`（见 §5.7） | 抛 → 回滚 |
+| 10 | **建 3 个唯一索引**（数据已迁完）：10a 逐个预检重复（§5.2.1）；10b 按 `idx_ms_dedupe` → `idx_mev_primary` → `idx_mi_dedupe` 顺序建；10c 用 `pragma_index_list` + `sqlite_master.sql` 逐条验证 | 预检有重复 → 抛 `MigrationConflictException`（表名 + 组数 + 键前缀）；建索引失败 → 抛 → 回滚（**不自动删重复行**） | 抛 → 回滚 |
+| 11 | 对齐 `sqlite_sequence` | 先收敛同名重复行 → `UPDATE` → `changes()==0` 再 `INSERT`（见 §5.7） | 抛 → 回滚 |
 | 12 | `ALTER TABLE zhuli_fact RENAME TO zhuli_fact_v1` | — | 抛 → 回滚 |
 | 13 | **不做** `PRAGMA user_version = 17` | 由 helper 的 `db.setVersion(17)` 在同一事务内完成（X-6） | — |
 
@@ -1127,19 +1157,98 @@ UPDATE zhuli_memory_item SET times_reinforced = (
 );
 ```
 
+#### 5.2.1 三个唯一索引的预检、创建与验证（P0-1，v4 新增）
+
+**为什么单开一节**：三个唯一索引是数据正确性的最后一道防线，但它们的创建时机必须在"所有数据写完"之后（否则逐行插入会撞中间态）。v3 只写了 `idx_mi_dedupe` 一个，另两个在升级库里根本不存在；而 `idx_ms_dedupe` 缺失会让同一条证据被反复插入，`idx_mev_primary` 缺失会让一条记忆出现两个 `PRIMARY` 来源——两者都不会报错，只会让"凭什么"变模糊。
+
+**① 预检（建索引之前，逐条跑；有任何一行就拒绝）**
+
+```sql
+-- P1  idx_ms_dedupe：同一证据被插了两次
+SELECT source_type, ref_table, ref_id, ref_sub_id, content_hash, COUNT(*) AS c
+FROM zhuli_memory_source
+GROUP BY source_type, ref_table, ref_id, ref_sub_id, content_hash
+HAVING c > 1;
+
+-- P2  idx_mev_primary：一条记忆有两个主来源
+SELECT memory_id, COUNT(*) AS c
+FROM zhuli_memory_evidence
+WHERE role = 'PRIMARY'
+GROUP BY memory_id
+HAVING c > 1;
+
+-- P3  idx_mi_dedupe：同槽同值有两条"当前/候选"
+SELECT dedupe_key, COUNT(*) AS c
+FROM zhuli_memory_item
+WHERE status IN ('ACTIVE','CANDIDATE')
+GROUP BY dedupe_key
+HAVING c > 1;
+```
+
+**② 冲突处置（不静默、不猜）**
+
+| 情况 | 处置 | 理由 |
+|---|---|---|
+| P1/P2/P3 任一返回 >0 行 | 抛 `MigrationConflictException(table, groups, sampleKeyPrefix)` → T0 回滚 | 没有经过确认的数据修复规则；自动删/自动合并会让"保留哪条"变成实现者的猜测 |
+| `CREATE UNIQUE INDEX` 本身失败（预检后仍撞） | 同样抛，消息带索引名与 SQLite 错误码 | 说明预检与建索引之间发生了写入（不应发生），或预检 SQL 与索引定义不一致 |
+| 诊断日志 | 只记 `table` / `groups` / `sample_key_prefix`（`sha256(key)` 前 8 位）/ `sqlite_code` | 不打印 `dedupe_key` 原文（它含 subject/value 的归一化结果，属敏感派生数据） |
+
+**③ 创建顺序与验证**
+
+```sql
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ms_dedupe
+  ON zhuli_memory_source(source_type, ref_table, ref_id, ref_sub_id, content_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mev_primary
+  ON zhuli_memory_evidence(memory_id) WHERE role='PRIMARY';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mi_dedupe
+  ON zhuli_memory_item(dedupe_key) WHERE status IN ('ACTIVE','CANDIDATE');
+```
+
+顺序 `source → evidence → item` 的理由：越靠后越可能因历史重复失败，把最容易失败的放最后，日志里"卡在哪一步"最直观；三者互不依赖，顺序不影响正确性。
+
+创建后逐条验证（缺一不可）：
+
+```sql
+-- V1 存在、唯一性标志正确（期望各 1 行，unique=1）
+SELECT name, "unique" FROM pragma_index_list('zhuli_memory_source')  WHERE name='idx_ms_dedupe';
+SELECT name, "unique" FROM pragma_index_list('zhuli_memory_evidence') WHERE name='idx_mev_primary';
+SELECT name, "unique" FROM pragma_index_list('zhuli_memory_item')     WHERE name='idx_mi_dedupe';
+
+-- V2 定义逐字一致（与 MemorySchema.EXPECTED_INDEXES 比对，去空白后全等）
+SELECT name, sql FROM sqlite_master
+WHERE type='index' AND name IN ('idx_ms_dedupe','idx_mev_primary','idx_mi_dedupe');
+
+-- V3 唯一性真的生效（在迁移事务内用 SAVEPOINT 试插一条重复，必须抛，然后回滚到 SAVEPOINT）
+SAVEPOINT verify_unique;
+-- 试插一条与既有行同键的记录（各索引一条），期望 SQLITE_CONSTRAINT
+ROLLBACK TO verify_unique;
+RELEASE verify_unique;
+```
+
+> **V3 为什么安全**：`SAVEPOINT` 在 Android 的嵌套事务里是**真实存在**的（`db.execSQL("SAVEPOINT …")` 是 SQL 层语句，不受 `SQLiteSession` 的嵌套记账影响）。试插的行在 `ROLLBACK TO` 后消失，不会污染数据。若实现者不愿在迁移里试插，最低要求是完成 V1 + V2，并在 `T-M47` 里用独立事务验唯一性——但**不能只断言索引名存在**。
+
+**④ 两条路径必须一致**
+
+| 路径 | 谁建 | 验证 |
+|---|---|---|
+| 新建（`onCreate`） | `MemorySchema.createAll(db, withUnique=true)` | `T-M40` 的索引断言 + `T-M49` |
+| 升级（`onUpgrade`） | 第 1 步建表（`withUnique=false`）→ 第 10 步建三个唯一索引 | `T-M47` + `T-M49` |
+
+`T-M49` 比较的是 `(name, unique, columns, where)` 四元组集合，不是"数量相等"——数量相等但列顺序不同，仍然是两条不同的结构。
+
 ### 5.3 逐字段迁移（代码级）
 
-`MemoryMigrator.migrateRow(c: Cursor): Row?` 的核心，一列不漏：
+`MemoryMigrator.migrateRow(c: Cursor): RowOutcome` 的核心，一列不漏（返回值的六种终态见 §5.9；**没有 `null`**）：
 
 | 目标列 | 取值 | 失败/边界 |
 |---|---|---|
 | `id` | `c.getLong(id)` | 显式写入，保真 |
 | `memory_type` | `if (legacyKind == "PREFERENCE") PREFERENCE else FACT` | — |
-| `subject` | `c.str(subject).trim()` | 空 → `skipped++`，返回 null |
+| `subject` | `c.str(subject).trim()` | 空 → 返回 `RowOutcome.SkippedNoSubject`（计数在调用方） |
 | `subject_key` | `MemoryText.norm(subject)` | 空（全标点）→ 用 `subject.lowercase()` 兜底，仍空则跳过 |
 | `predicate` | `trim()` | 空 → 保留空串（C0.2 不要求跳过；空谓词仍是"属性名缺失"的事实，但**必须**参与 dedupe，不能丢） |
 | `qualifier_key` | `""` | 常量 |
-| `value` | `trim()` | 空 → `skipped++` |
+| `value` | `trim()` | 空 → 返回 `RowOutcome.SkippedNoValue`（计数在调用方） |
 | `content` | `"$subject｜$predicate｜$value"` | 与 `Fact.display` 逐字一致 |
 | `normalized_content` | `norm(content)` | — |
 | `dedupe_key` | `MemoryText.dedupeKey(GLOBAL, "", memoryType, subjectKey, predicate, "", norm(value), bucket)` | `bucket` 见 §5.4 |
@@ -1151,7 +1260,7 @@ UPDATE zhuli_memory_item SET times_reinforced = (
 | `confidence_basis` | 5 条映射（见下表） | — |
 | `source_id` | `evidence` 的 PRIMARY 的 source id | — |
 | `scope_type` / `scope_id` | `'GLOBAL'` / `''` | 常量 |
-| `sensitivity` | `MemoryGuard.classify(ALL_TEXT)`：SECRET → 整行隔离；SENSITIVE → 1；否则 0。**`ALL_TEXT` = `subject`+`predicate`+`value`+`source_text` 四字段拼接**（§2.7 / P1-3） | SECRET → `quarantined++`，**不插 item、不插 source、不插 evidence** |
+| `sensitivity` | `MemoryGuard.classify(ALL_TEXT)`：SECRET → 整行隔离；SENSITIVE → 1；否则 0。**`ALL_TEXT` = `subject`+`predicate`+`value`+`source_text` 四字段拼接**（§2.7 / v3 P1-3） | SECRET → 返回 `RowOutcome.Quarantined`，**不插 item、不插 source、不插 evidence** |
 | `event_start` / `event_end` | `0` | 旧表没有 |
 | `valid_from` | 原值（0 保留 0） | **不设 `time_confidence`** |
 | `valid_until` | **`0`** | 常量，不读 `valid_to` |
@@ -1180,7 +1289,7 @@ UPDATE zhuli_memory_item SET times_reinforced = (
 | `INFERRED` | — | `MODEL_INFERRED` | **0.65** |
 | `SYSTEM` | — | `EXTERNAL_VERIFIED` | 0.90 |
 
-#### 5.3.1 状态映射的三种输入（P1-1：必须覆盖 `NULL`）
+#### 5.3.1 状态映射的三种输入（v3 P1-1：必须覆盖 `NULL`）
 
 旧表 `zhuli_fact.status` 是 `TEXT NOT NULL DEFAULT 'ACTIVE'`（`InboxDatabase.kt:520` 附近），理论上不会是 `NULL`。但**迁移代码不能依赖"理论上"**：手工改库、历史 beta 包、`ALTER TABLE` 补列都可能留下 `NULL`。更关键的是**统计口径**——SQL 的三值逻辑会让 `NULL` 从"未知值计数"里漏掉：
 
@@ -1211,7 +1320,7 @@ WHERE status IS NULL
 2. **`legacy_status` 只对未知值写**，合法值不写——否则 `T-M36` 的第 6 条断言（"含 `legacy_status` 的行必须 `CANDIDATE`"）会把正常行也扫进来。
 3. **`legacy_status` 的值必须过 `SensitiveGuard.redact` 再截 32 字**。它进了 `payload_json`，而 `payload_json` 会被 `selfCheck` 和调试日志读取；一个被手工写成手机号的状态值不能原样落库。
 
-#### 5.3.2 SECRET 检查的位置与顺序（P1-3：全字段 + 先判后写）
+#### 5.3.2 SECRET 检查的位置与顺序（v3 P1-3：全字段 + 先判后写）
 
 v2 写"分级只看 `content`"（§2.7），但一条 `zhuli_fact` 有**四个**文本字段：`subject` / `predicate` / `value` / `source_text`。SECRET 完全可能只出现在 `source_text` 里（短信原文含卡号），而 `content` 是 `subject｜predicate｜value` 的拼接——只查 `content` 会**漏掉整条短信里的卡号**。
 
@@ -1248,7 +1357,7 @@ migrateRow(cursor) 的第 1 步就是 classifyForMigration —— 在任何 INSE
 
 所以**拒绝必须发生在任何关联表写入之前**，不是一个"事后清理"的问题。
 
-> **`excerpt` 的残留风险不在 C1 解决**：`SensitiveGuard.redact` 是正则脱敏，不保证 100%。C1 的承诺是"SECRET 整行不迁入"；SENSITIVE 行的 `excerpt` 仍可能含部分信息，这条写进 §19.3 的 U-12（与 C0.2 §14.2 阶段 3 的备份清理同一批处理）。
+> **`excerpt` 的残留风险不在 C1 解决**：`SensitiveGuard.redact` 是正则脱敏，不保证 100%。C1 的承诺是"SECRET 整行不迁入"；SENSITIVE 行的 `excerpt` 仍可能含部分信息，这条写进 §19.3 的 **U-14**（与 C0.2 §14.2 阶段 3 的备份清理同一批处理）。
 
 ### 5.4 四条禁止（写错任何一条就等于让数据说谎）
 
@@ -1266,7 +1375,7 @@ migrateRow(cursor) 的第 1 步就是 classifyForMigration —— 在任何 INSE
 ```kotlin
 // 对每一行 fact —— 顺序不可调换：classify 必须在任何 INSERT 之前（§5.3.2）
 val sensitivity = MemoryGuard.classifyForMigration(subject, predicate, value, sourceText)
-if (sensitivity == Sensitivity.SECRET) { report.quarantined++; return null }   // 零写入
+if (sensitivity == Sensitivity.SECRET) return RowOutcome.Quarantined            // 零写入；账本见 §5.9
 
 val excerpt = MemoryGuard.excerpt(sourceText.ifBlank { content })   // redact + ≤120
 val hash    = MemoryText.sha256Hex(MemoryText.norm(sourceText.ifBlank { content }))
@@ -1281,6 +1390,8 @@ INSERT evidence(memory_id = factId, source_id = sourceId, role = 'PRIMARY',
                 first_seen_at = observedAt, last_seen_at = observedAt, seen_count = 1)
 UPDATE item SET source_id = sourceId WHERE id = factId
 ```
+
+`migrateRow` 的返回类型是 §5.9 的 `RowOutcome`，**不是 `null`**——`Quarantined` / `SkippedNoSubject` / `SkippedNoValue` 各是一个终态，计数与日志由调用方统一处理。v3 这里写 `return null` 与 §5.9 的"出现第二个 `return null` 就是绕过账本"自相矛盾，v4 已改。
 
 三条约束：
 
@@ -1319,7 +1430,7 @@ WHERE status IN ('ACTIVE','CANDIDATE') GROUP BY dedupe_key HAVING COUNT(*)>1
 db.execSQL("INSERT INTO zhuli_memory_item(id, …) VALUES(?, …)", args)
 ```
 
-**`sqlite_sequence` 的处理（P1-8，v3 重写）**
+**`sqlite_sequence` 的处理（v3 P1-8；v4 P1-1 重写）**
 
 v2 写"显式插大 id 时 SQLite 会自动跟进，但仍显式对齐一次"。结论对，**前提没写，写法也不稳**。三点必须补齐：
 
@@ -1329,23 +1440,58 @@ v2 写"显式插大 id 时 SQLite 会自动跟进，但仍显式对齐一次"。
 
 因此"表不存在"不是需要处理的场景。但迁移代码仍要**先 `tableExists(db, "sqlite_sequence")`** 再操作，因为 `T-M45`（人造只含 `inbox` 的 v16 库）里它存在、而某些测试夹具可能手工建表绕过 `onCreate`。不存在就跳过这一步，不抛。
 
-**② 写法：用 `INSERT OR REPLACE`，不用 `UPDATE`。** 原因：迁移**可能一行都没插入**（全被 `skipped` / `quarantined`）。此时 `sqlite_sequence` 里**没有** `zhuli_memory_item` 这一行，`UPDATE` 影响 0 行、静默不生效；后续第一条 INSERT 仍从 1 开始——这在"空迁移"下恰好正确，但在"插入过但 sequence 行被外部删除"的损坏库里会撞 id。
+**② 写法：先 `UPDATE`，`changes()==0` 再 `INSERT`。不能用 `INSERT OR REPLACE`。**
+
+v3 写的是 `INSERT OR REPLACE INTO sqlite_sequence(name,seq) SELECT 'zhuli_memory_item', MAX(id) …`，理由是"无行则插入、有行则替换"。**这个前提不成立**：`sqlite_sequence` 是 SQLite 内部表，schema 就是 `CREATE TABLE sqlite_sequence(name,seq)`，**`name` 上没有唯一约束、也没有索引**（本地实测：`PRAGMA index_list('sqlite_sequence')` 返回 0 行；连续两次 `INSERT OR REPLACE` 后出现 3 行同名记录，值都是 1）。没有唯一冲突，`REPLACE` 就退化成普通 `INSERT`——每次对齐都**多一行**。
+
+重复行的直接后果不是"立刻撞 id"（AUTOINCREMENT 取新 rowid 时会被表内最大 rowid 兜住），而是：
+
+- "同名恰好一行"这个前提被破坏，任何按 `SELECT seq … LIMIT 1` 读的实现会拿到**最旧**的那行；
+- 后续 `UPDATE sqlite_sequence SET seq=? WHERE name=?` 会一次改多行，看起来"正常"，直到有人插入一条 `seq` 更小的同名行；
+- 迁移的幂等性无法断言（跑两次得到 2 行、3 行……）。
+
+正确写法（`alignSequence`，可复用）：
 
 ```sql
--- 正确：无行则插入，有行则更新
-INSERT OR REPLACE INTO sqlite_sequence(name, seq)
-SELECT 'zhuli_memory_item', COALESCE(MAX(id), 0) FROM zhuli_memory_item;
+-- 1) 收敛历史重复行：只留 rowid 最大的那条（兼容被旧版本写脏的库）
+DELETE FROM sqlite_sequence
+WHERE name = :table
+  AND rowid <> (SELECT MAX(rowid) FROM sqlite_sequence WHERE name = :table);
+
+-- 2) 有行则更新
+UPDATE sqlite_sequence SET seq = :maxId WHERE name = :table;
+--    在 Kotlin 里读 changes()：db.rawQuery("SELECT changes()") 或 compileStatement 的 executeUpdateDelete()
+-- 3) changes() == 0 才插入（空迁移 / sequence 行被外部删掉）
+INSERT INTO sqlite_sequence(name, seq) VALUES(:table, :maxId);
+
+-- 4) 断言（不通过就抛 → 整个迁移回滚）
+SELECT COUNT(*) FROM sqlite_sequence WHERE name = :table;   -- 必须 == 1
+SELECT seq      FROM sqlite_sequence WHERE name = :table;   -- 必须 >= :maxId
 ```
 
-**③ 必须验证"后续自动 ID 不冲突"，而不只是对齐。** 对齐本身不能证明没冲突——要断言"下一条 INSERT 拿到的 id > `MAX(迁移 id)`"。这一步放在 `MemoryMigratorTest` 的 `T-M46`（v3 新增，见 §10.2）：
+`:maxId = SELECT COALESCE(MAX(id), 0) FROM zhuli_memory_item`。
+
+**③ 其他表也要查，不能只修一张。** 迁移里只有 `zhuli_memory_item` 用显式 id（`source` / `evidence` / `relation` / `revision` 都走自增，SQLite 自动维护 `seq`），所以**修复对象只有一张**；但"`sqlite_sequence` 同名重复行"是库级健康问题，必须**体检全部 9 张 AUTOINCREMENT 表**（只报告、不擅自改）：
+
+```sql
+SELECT name, COUNT(*) AS c FROM sqlite_sequence GROUP BY name HAVING c > 1;
+```
+
+结果写进迁移日志的 `seq_duplicate_tables` 字段（0 表示健康）。除 `zhuli_memory_item` 外，其他表**不自动收敛**——它们不属于本次迁移的写入范围，擅自动会掩盖别人的 bug。
+
+**④ 必须验证"后续自动 ID 不冲突"，而不只是对齐。** 对齐本身不能证明没冲突——要断言"下一条 INSERT 拿到的 id > `MAX(迁移 id)`"。这一步放在 `MemoryMigratorTest` 的 `T-M46`（v3 新增，v4 加强，见 §10.2）：
 
 ```
 迁移后：INSERT INTO zhuli_memory_item(subject, …) VALUES('新行', …)   -- 不指定 id
 断言：  新 id == MAX(迁移 id) + 1
-断言：  SELECT seq FROM sqlite_sequence WHERE name='zhuli_memory_item' >= MAX(id)
+断言：  SELECT COUNT(*) FROM sqlite_sequence WHERE name='zhuli_memory_item' == 1
+断言：  SELECT seq      FROM sqlite_sequence WHERE name='zhuli_memory_item' >= MAX(id)
+再插一行：id 继续 +1（证明 sequence 在持续跟进，不是只对了一次）
 ```
 
-> **为什么不在迁移里"预留一段 id 区间"**：那会让 ID 不连续、并给 C2 的 `MAX(id)` 类查询制造空洞。AUTOINCREMENT 的语义就是"单调递增、不复用"，`INSERT OR REPLACE` 对齐后它自然满足。
+`T-M52` 单独盯"幂等"：人为先造 3 行同名 `sqlite_sequence`，跑两次 `alignSequence`，断言最终恰好 1 行且 `seq` 不变。
+
+> **为什么不在迁移里"预留一段 id 区间"**：那会让 ID 不连续、并给 C2 的 `MAX(id)` 类查询制造空洞。AUTOINCREMENT 的语义就是"单调递增、不复用"，`UPDATE`/`INSERT` 对齐后它自然满足。
 
 断链：
 
@@ -1370,7 +1516,7 @@ for each row in zhuli_fact_vec:
 
 **不做重新 embed**：迁移不跑模型（C0.2 §8.7）。换 space 的重建由 `MemoryIndexer.drainOnce` 的 existing 逻辑处理（`MemoryIndexer.kt:169-174`）。
 
-### 5.9 逐行处置账本与数量闭合（P1-2，v3 重写）
+### 5.9 逐行处置账本与数量闭合（v3 P1-2）
 
 v2 的恒等式是 `src == inserted + quarantined + skipped`。**它是漏的**：它没有给"插入失败但仍继续"的行留位置（v2 §5.2 第 2 步明确允许 `failed`），也没有区分"被合并"的行去了哪里。结果是：一个 20k 库只要有 1 行插入失败，恒等式要么不成立（迁移失败），要么被人为调平（数据说谎）。
 
@@ -1417,7 +1563,7 @@ sealed interface RowOutcome {
 // migrateRow 只返回 RowOutcome；计数与日志在调用方，避免"某条路径忘了 ++"
 ```
 
-这条约束是给 review 用的：**只要 `migrateRow` 里出现第二个 `return null`，就说明有人绕过了账本**。用 sealed 类型 + `when` 穷举，编译器会挡住。
+这条约束是给 review 用的：**只要 `migrateRow` 的返回类型不是 `RowOutcome`，或出现 `return null`，就说明有人绕过了账本**。用 sealed 类型 + `when` 穷举，编译器会挡住。
 
 迁移末尾必须自证：
 
@@ -1490,57 +1636,129 @@ WHERE status IS NULL
 | 建表失败（磁盘满/DDL 不支持） | 抛 → 回滚 | 同上 |
 | 单行插入失败 | 记 `failed++`，继续处理剩余行（为了在一次运行里报出**全部**失败行） | 无 |
 | 数量不闭合 **或** `failed>0` | 抛 → 回滚（**整个迁移一条都不留**） | 升级失败 + `lastMigrationError` |
-| 唯一索引建不起来 | 打印前 5 个重复键的 `dedupe_key` 前 8 位（不打印原文） → 抛 → 回滚 | 同上（说明 §5.6 有遗漏） |
+| 唯一索引预检发现重复（三个中任一） | 抛 `MigrationConflictException`（表名 + 组数 + `sha256(key)` 前 8 位） → 回滚 | 同上（说明 §5.6 有遗漏，或 `source` 去重失效） |
+| 唯一索引建不起来（预检通过后仍失败） | 抛（带索引名 + SQLite 错误码） → 回滚 | 同上 |
 | FTS 建表/触发器失败 | **不中止** → `ftsMode` 降档 | 检索变慢但正确 |
 | `sqlite_sequence` 表不存在 | **跳过**（不抛），记 `seqAligned=false` | 无（新库不该走迁移，见 §5.7） |
+| `sqlite_sequence` 同名行收敛后仍 ≠1 行，或 `seq < MAX(id)` | 抛 → 回滚 | 升级失败 + `lastMigrationError` |
 | 改名失败 | 抛 → 回滚（数据已在新表，但事务回滚会一起撤） | 升级失败 |
 
-### 5.12 WAL 前置断言：**拒绝**而不是 checkpoint（P0-2，v3 重写）
+### 5.12 `journal_mode` 闸门：备份之前拒绝 WAL（v4 P0-3）
 
-v2 §5.12 写的是"检测到 `wal` 就 `PRAGMA wal_checkpoint(FULL)`，把 WAL 并回主库，保证后续文件复制完整"。**这个方案不成立**，两个原因：
+**两版都错过一次，这里先说清错在哪**：
 
-1. **位置错**：那段代码在 `MemoryMigrator.migrate()` 里，而备份（`backupBeforeMigration`）早在 `onUpgrade` 第一行就执行完了。checkpoint 发生在备份**之后**，救不了备份。
-2. **执行不了**：此时 helper 的 T0 已经 `BEGIN EXCLUSIVE`（WAL 下为 `BEGIN IMMEDIATE`），当前连接持有写锁。`wal_checkpoint` 需要写锁，会返回 `SQLITE_BUSY` 或直接被阻塞——**在事务内 checkpoint 自己的库是不可能的**。
+| 版本 | 写法 | 错在哪 |
+|---|---|---|
+| v2 | 在 `MemoryMigrator.migrate()` 里检测到 `wal` → `PRAGMA wal_checkpoint(FULL)` 后继续 | ① 备份早在 `migrate()` 之前就做完了，checkpoint 救不了备份；② T0 已持有写锁，事务内 checkpoint 自己的库会 `SQLITE_BUSY` |
+| v3 | 在 `MemoryMigrator` 第 0 步 `require(journal_mode in 回滚日志族)` | 位置仍然在**备份之后**。断言能拦住迁移，但**拦不住一个已经生成的不完整备份**——而那个备份正是回滚方案 L2 的唯一依靠 |
 
-**v3 的方案：断言 + 拒绝。**
+**v4 的规则一句话**：**先判模式，再决定要不要拷贝；判不过就一个字节都不拷，直接中止。**
+
+#### 5.12.1 代码位置与实现
+
+闸门放在备份函数的第一行，而不是迁移函数的第 0 步：
 
 ```kotlin
-// MemoryMigrator 的第 0 步（在 onUpgrade 内、backupBeforeMigration 之后）
-val mode = db.rawQuery("PRAGMA journal_mode", null).use { if (it.moveToFirst()) it.getString(0) else "" }
-require(mode.lowercase() in setOf("delete", "truncate", "persist")) {
-    "迁移拒绝在 WAL 模式下进行：当前 journal_mode=$mode。" +
-    "备份已在事务内完成，WAL 下该备份不完整；请先切回 delete 模式并重新打开库。"
+// 与 MemorySchema 同包，internal 可见，测试可直接调
+internal object MigrationBackup {
+
+    /** 与 §5.2 第 0 步、§5.12.2 共用同一常量，禁止各写一份。 */
+    val ALLOWED = setOf("delete", "truncate", "persist")
+
+    class UnsupportedJournalModeException(val mode: String) :
+        IllegalStateException("迁移拒绝在 $mode 模式下备份：该模式下主库文件不含未 checkpoint 的已提交页")
+
+    /**
+     * @return BackupResult.Copied / BackupResult.Skipped(reason)
+     * @throws UnsupportedJournalModeException 模式不在 ALLOWED 里（**迁移必须中止**）
+     */
+    fun checkAndBackup(db: SQLiteDatabase, oldVersion: Int, dir: File): BackupResult {
+        // ── 第 1 步：模式闸门。在 open/copy 之前，绝不先碰文件 ──
+        val mode = db.rawQuery("PRAGMA journal_mode", null).use {
+            if (it.moveToFirst()) it.getString(0).lowercase() else ""
+        }
+        if (mode !in ALLOWED) {
+            InboxDatabase.lastBackupError = "unsupported_journal_mode:$mode"
+            throw UnsupportedJournalModeException(mode)      // 中止，不拷贝
+        }
+
+        // ── 第 2 步：拷贝（失败不中止，沿用现有语义） ──
+        return try {
+            val src = File(db.path)
+            val dst = File(dir, "v${oldVersion}_${System.currentTimeMillis()}.db")
+            dir.mkdirs()
+            src.copyTo(dst, overwrite = false)
+            pruneOldBackups(dir, keep = 3)
+            BackupResult.Copied(dst)
+        } catch (t: Throwable) {
+            InboxDatabase.lastBackupError = "copy_failed:${t.javaClass.simpleName}:${t.message?.take(80)}"
+            Log.w(TAG, "备份失败，继续迁移（备份不是前置条件）", t)
+            BackupResult.Skipped("copy_failed")
+        }
+    }
 }
 ```
 
-**为什么是"拒绝"而不是"想办法兼容"**：
+`InboxDatabase.onUpgrade` 的第一行因此变成：
+
+```kotlin
+override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+    // 模式不合法时这里会抛，T0 随之回滚；不会留下半份备份
+    MigrationBackup.checkAndBackup(db, oldVersion, backupDir)
+    upgradeSteps(db, oldVersion, newVersion)   // 内部再调 MemoryMigrator.migrate()
+}
+```
+
+#### 5.12.2 两种失败必须分开
+
+| 失败 | 异常 | 是否中止迁移 | 已写文件 | 恢复动作 |
+|---|---|---|---|---|
+| `journal_mode` 不在 `{delete, truncate, persist}` | `UnsupportedJournalModeException` | **是** | **0 个** | 用户/开发者把库切回 delete 后重开；日志 `lastBackupError=unsupported_journal_mode:wal` |
+| 拷贝失败（磁盘满、无权限、路径不可写） | 不抛（内部 catch） | 否 | 可能有一个 0 字节/半截文件 | 记 `lastBackupError=copy_failed:…`；迁移继续；下次启动重新尝试备份 |
+
+**为什么不能把前者也降级成"备份失败但继续"**：WAL 下主库文件本来就不完整，拷出来的东西**看起来像备份**（文件名、大小都正常），恢复时才发现少了最后几个事务。这比"没有备份"更危险——它会让 L2 回滚路径在关键时刻给出一个旧到不可接受的状态，而且没人知道。
+
+**为什么不能"连 `-wal` / `-shm` 一起拷"**：三个文件必须在同一时刻、同一 WAL 世代内配套；`-shm` 还是进程共享内存的映射，拷贝顺序与打开顺序都会影响恢复结果。这是"用一个更复杂的机制去救一个本该拒绝的场景"，收益为负。
+
+#### 5.12.3 这道闸门在真实路径上会不会触发
+
+诚实地说：**常规路径下几乎不会**。原因是 Android 的 `SQLiteDatabase` 在打开一个非 WAL 配置的库时，会对每条连接执行 `PRAGMA journal_mode=DELETE`；一个历史上是 WAL 的库，在 helper 打开后已经被重置为 delete。所以这道闸门大多数时候是"确认安全"，而不是"抓到 WAL"。
+
+它的价值在三个地方：
+
+1. **防止未来有人打开 `enableWriteAheadLogging()`**——那一刻 helper 的连接池会从 1 变成 >1，闸门会立刻让升级失败，而不是悄悄生成坏备份；
+2. **防止有人绕过 helper 直接调 `MigrationBackup` / `MemoryMigrator.migrate()`**（测试、脚本、未来的维护入口）；
+3. **把"备份的完整性前提"写进代码**，而不是只写在文档里靠人记。
+
+因此 `T-M50` 的构造方式是：用 `SQLiteDatabase.openDatabase(path, null, OPEN_READWRITE or ENABLE_WRITE_AHEAD_LOGGING)` 打开一个 v16 库（此时 `PRAGMA journal_mode` 确实是 `wal`），直接调 `MigrationBackup.checkAndBackup`，断言抛异常、备份目录无新文件、库的数据与 `user_version` 都没变。
+
+#### 5.12.4 为什么是"拒绝"而不是"兼容"
 
 | 选项 | 代价 | 是否采纳 |
 |---|---|---|
-| A 拒绝（v3） | 若哪天切 WAL，升级会显式失败并给出可读原因 | ✅ |
+| **A 备份前拒绝**（v4） | 若哪天切 WAL，升级会**在拷贝前**显式失败并给出可读原因 | ✅ |
 | B 把备份前移到 helper 之前 | 需 `open class InboxDatabase` + `override getWritableDatabase/getReadableDatabase`，影响 30+ 构造点；且 `getReadableDatabase` 也会触发 `onUpgrade`，两个入口都要覆盖 | ❌ 超出 §8.5 的 diff 预算 |
 | C 在事务内 checkpoint | 技术上不可行（持锁） | ❌ |
-| D 备份时连 `-wal` / `-shm` 一起拷 | 拷到的是"hot WAL"，恢复时必须三个文件配套且顺序正确；任何一步失败就是坏库 | ❌ 复杂度远高于收益 |
+| D 备份时连 `-wal` / `-shm` 一起拷 | 拷到的是"hot WAL"，恢复时必须三个文件配套且顺序正确；任何一步失败就是坏库 | ❌ |
 
 **当前事实支持选 A**：
 - C0.2 §8.10 实测应用库 `journal_mode=delete`；
 - `InboxDatabase` 从未调用 `enableWriteAheadLogging()`，Android 默认就是 delete 模式；
 - 全仓库 `grep "wal"` 在数据库相关代码里 0 命中（除注释）。
 
-所以 A 是"用断言把不存在的情况变成显式错误"，成本 3 行，收益是**永远不会生成一个坏备份却以为它好的**。
+> **如果将来要切 WAL**（例如为了读写并发），必须先做两件事，且都不在 C1-B：① 把 `backupBeforeMigration` 前移到 `getDatabaseLocked` 之前（含 `open class` 改造）；② 在 C1-B5 之外单开一批，验证 WAL 下的备份可恢复。这条写进 §19.3 的 **U-13**。
 
-> **如果将来要切 WAL**（例如为了读写并发），必须先做两件事，且都不在 C1-B：① 把 `backupBeforeMigration` 前移到 `getDatabaseLocked` 之前（含 `open class` 改造）；② 在 C1-B5 之外单开一批，用 `T-M47` 验证 WAL 下的备份可恢复。这条写进 §19.3 的 U-13。
-
-**备份本身的语义（不因 WAL 而变）**：
+#### 5.12.5 备份本身的语义（不因闸门而变）
 
 | 项 | 现状 | C1-B 是否改 |
 |---|---|---|
 | 时机 | `onUpgrade` 第一行，T0 内、未写入 | **不改**（§5.1 第 3 步） |
+| 前置 | **新增：`journal_mode` 闸门，在拷贝之前** | **新增**（P0-3） |
 | 内容 | 只拷主库 `.db` | 不改 |
-| 失败处理 | 记 `Log.w`，继续迁移 | 不改（备份是"多一层保险"，不是前置条件） |
+| 失败处理 | 记 `Log.w`，继续迁移 | 不改（拷贝失败不是前置条件） |
 | 保留份数 | 最近 3 份 | 不改 |
 | 目录 | `databases/pre_migration/` | 不改 |
-| **新增** | 记录 `lastBackupError`（静态字段）供自检页读取 | 新增，+2 行 |
+| 记录 | `lastBackupError`（静态字段）供自检页读取 | 新增，+2 行 |
 
 ### 5.13 Android 设备耗时测试设计（**禁止用桌面 Python 的数**）
 
@@ -1556,7 +1774,7 @@ C0.2 的预演是 host Python（0.17–0.21 ms/行），C0.2 A-3 明确说"设�
 | 门槛 | 5k ≤ 3s（C0.2 A-3）；20k ≤ 12s（线性外推 4×）。超门槛的处置见 §5.13.1 |
 | 不算数的 | Robolectric 的耗时（JVM + 不同 SQLite，只用于相对比较） |
 
-#### 5.13.1 超门槛的处置：只能"分批处理、单事务提交"（P0-3，v3 重写）
+#### 5.13.1 超门槛的处置：只能"分批处理、单事务提交"（v3 P0-3）
 
 v2 在 §5.13 与 §14.1 两处都写"超门槛 → 启用 C0.2 §9.6 的分批方案（`batchSize` 参数 + `onUpgrade` 内的分批提交）"。**"在 `onUpgrade` 内分批提交"这句话是错的**，必须撤回：
 
@@ -1613,79 +1831,243 @@ C1-A 的结论是 `TRIGGER`，但附了三条硬约束（C1-A §7.2）：
 
 C1-A 还实测了一条**必须写进代码**的事实：`trusted_schema=OFF` 时触发器**建得成、写才炸**（`SQLiteException: unsafe use of virtual table`）。所以第 2 步（建触发器）通过**不能**作为 `TRIGGER` 的依据。
 
-### 6.2 `detectFtsMode` 的七步
+### 6.2 `detectFtsMode`：探测、清理、再决定（v4 P0-2）
+
+v3 的这段伪码有两个必须修的问题：
+
+| # | v3 的写法 | 后果 |
+|---|---|---|
+| 1 | `return finish(TRIGGER, null)` 在 `try` 里，清理在 `finally` 里 | **先返回/缓存 TRIGGER，后清理**。清理失败被 `runCatching` 吞掉，于是"模式=TRIGGER + 库里留着探测表/触发器"同时成立 |
+| 2 | `lastError` 从未声明，`finish()` 也没有定义 | 照抄编译不过；实现者只能自己猜语义，猜错就回到问题 1 |
+
+**v4 的规则：探测分两段，先证明"能力可用"，再证明"现场干净"；两段都过才允许返回/缓存 `TRIGGER`。**
+
+#### 前置条件（三条，写进代码）
 
 ```kotlin
-// MemorySchema.kt
-enum class FtsMode { TRIGGER, APP_SYNC, NONE }
+if (db.isWriteAheadLoggingEnabled) return ProbeOutcome.AppSync("wal", "connection pool > 1")
+if (journalMode(db) !in MemorySchema.ROLLBACK_JOURNAL_MODES) return ProbeOutcome.AppSync("journal_mode", mode)
+// 全程只用传入的 db：不 new SQLiteDatabase，不 openDatabase，不新起线程
+```
 
-fun detectFtsMode(db: SQLiteDatabase, cache: FtsModeCache?, dbVersion: Int): FtsMode {
-    // 0) 缓存命中必须经过"三条有效性校验"，不能直接 return（P0-4，见 §6.4）
-    cache?.get(dbVersion = dbVersion, sqliteVersion = sqliteVersion(db), db = db)?.let { return it }
+第一条是 **P1-6** 的落点：非 WAL 时 Android 的连接池大小恒为 1（AOSP `SQLiteConnectionPool.setMaxConnectionPoolSizeLocked()`），探测与后续写入必然是**同一条底层连接**；WAL 时池子 >1，`trusted_schema` 这类连接级 pragma 无法保证一致，因此**直接不启用 TRIGGER**。详见 §6.2.1 的 ③。
 
-    val tmp = "zhuli_fts_probe_${System.nanoTime()}"      // 独立表名，绝不碰用户表
-    try {
-        // 1) 建 FTS4 虚拟表（这一步失败 → NONE）
-        try { db.execSQL("CREATE VIRTUAL TABLE $tmp USING fts4(search_text, tokenize=simple)") }
-        catch (t: Throwable) { return finish(NONE, t) }
+#### 结果类型（三档，穷举）
 
-        // 2) 建"探测用 item 表 + 3 个触发器"（触发器体与真实 DDL 逐字一致，只换表名）
-        db.execSQL("CREATE TABLE ${tmp}_item(id INTEGER PRIMARY KEY, search_text TEXT, status TEXT)")
-        val triggers = listOf(
-            "CREATE TRIGGER ${tmp}_ai AFTER INSERT ON ${tmp}_item BEGIN " +
-                "INSERT INTO $tmp(rowid, search_text) VALUES (new.id, new.search_text); END",
-            "CREATE TRIGGER ${tmp}_au AFTER UPDATE OF search_text, status ON ${tmp}_item BEGIN " +
-                "DELETE FROM $tmp WHERE rowid = old.id; " +
-                "INSERT INTO $tmp(rowid, search_text) SELECT new.id, new.search_text WHERE new.status <> 'DELETED'; END",
-            "CREATE TRIGGER ${tmp}_ad AFTER DELETE ON ${tmp}_item BEGIN " +
-                "DELETE FROM $tmp WHERE rowid = old.id; END",
-        )
-        var triggerOk = 0
-        for (sql in triggers) {
-            try { db.execSQL(sql); triggerOk++ } catch (t: Throwable) { /* 记录，不抛 */ }
+```kotlin
+internal sealed interface ProbeOutcome {
+    /** 只有"能力全过 + 清理全过 + 无残留"才可能落到这里 */
+    data object TriggerOk : ProbeOutcome
+    /** FTS4 可用但触发器不可用/不同步，或现场没清干净 */
+    data class AppSync(val reason: String, val detail: String) : ProbeOutcome
+    /** FTS4 虚拟表根本建不出来 */
+    data class None(val reason: String, val detail: String) : ProbeOutcome
+}
+```
+
+#### 完整伪码（变量全部声明，可直接照着写）
+
+```kotlin
+internal object FtsProbe {
+    private const val PREFIX = "zhuli_fts_probe_"
+    private val SEQ = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** 故障注入点：只有测试会赋值；release 构建里恒为 null。抛异常 = 该次 DROP 失败。 */
+    @VisibleForTesting
+    internal var dropInterceptor: ((String) -> Unit)? = null
+
+    private const val SENTINEL = "会议 议提 提醒"
+
+    /** 这两类降级是"环境/现场"问题，不是能力结论：修好后必须能自动回到 TRIGGER，所以不缓存。 */
+    private val NON_CACHEABLE = setOf("cleanup_failed", "wal")
+
+    fun probe(db: SQLiteDatabase): ProbeOutcome {
+        // ── 0) 前置条件 ──
+        if (db.isWriteAheadLoggingEnabled) return ProbeOutcome.AppSync("wal", "connection pool > 1")
+        val mode = journalMode(db)
+        if (mode !in MemorySchema.ROLLBACK_JOURNAL_MODES) {
+            return ProbeOutcome.AppSync("journal_mode", mode)
         }
-        // 2 失败 → APP_SYNC（虚拟表能用，只是触发器不行）
-        if (triggerOk < 3) return finish(APP_SYNC, lastError)
 
-        // 3–6) 功能性验证：插哨兵 → 索引 +1 → 改词 → 旧词消失 → 删 → 索引 -1
-        val before = ftsCount(db, tmp)                    // 0
-        db.execSQL("INSERT INTO ${tmp}_item(id, search_text, status) VALUES (1, '会议 议提 提醒', 'ACTIVE')")
-        if (ftsCount(db, tmp) != before + 1) return finish(APP_SYNC, null)   // 建成功但没同步
-        if (!matches(db, tmp, "\"会议\" \"提醒\"")) return finish(APP_SYNC, null)
-        db.execSQL("UPDATE ${tmp}_item SET search_text='快递 递到 到了' WHERE id=1")
-        if (matches(db, tmp, "\"会议\"")) return finish(APP_SYNC, null)      // 旧词还在
-        if (!matches(db, tmp, "\"快递\"")) return finish(APP_SYNC, null)     // 新词没进
-        db.execSQL("UPDATE ${tmp}_item SET status='DELETED' WHERE id=1")
-        if (ftsCount(db, tmp) != before) return finish(APP_SYNC, null)
-        db.execSQL("UPDATE ${tmp}_item SET status='ACTIVE' WHERE id=1")
-        if (ftsCount(db, tmp) != before + 1) return finish(APP_SYNC, null)   // 恢复没重挂
-        db.execSQL("DELETE FROM ${tmp}_item WHERE id=1")
-        if (ftsCount(db, tmp) != before) return finish(APP_SYNC, null)
+        val tag = PREFIX + System.nanoTime() + "_" + SEQ.incrementAndGet()
+        val fts = tag
+        val item = tag + "_item"
+        val triggerNames = listOf(tag + "_ai", tag + "_au", tag + "_ad")
+        val created = LinkedHashSet<String>()          // 只清理"确实建成功"的对象
+        var capability: ProbeOutcome = ProbeOutcome.AppSync("not_started", "")
+        var cleanupErrors: List<String> = emptyList()
 
-        return finish(TRIGGER, null)
-    } catch (t: Throwable) {
-        return finish(APP_SYNC, t)                        // 任何未预期异常 → 不赌 TRIGGER
-    } finally {
-        // 清理：触发器 → item 表 → 虚拟表（顺序不能反）
-        runCatching { db.execSQL("DROP TRIGGER IF EXISTS ${tmp}_ai") }
-        runCatching { db.execSQL("DROP TRIGGER IF EXISTS ${tmp}_au") }
-        runCatching { db.execSQL("DROP TRIGGER IF EXISTS ${tmp}_ad") }
-        runCatching { db.execSQL("DROP TABLE IF EXISTS ${tmp}_item") }
-        runCatching { db.execSQL("DROP TABLE IF EXISTS $tmp") }
+        try {
+            try {
+                db.execSQL("CREATE VIRTUAL TABLE $fts USING fts4(search_text, tokenize=simple)")
+                created += fts
+                db.execSQL("CREATE TABLE $item(id INTEGER PRIMARY KEY, search_text TEXT, status TEXT)")
+                created += item
+
+                var ok = 0
+                var lastError = ""                     // ← v3 漏了声明，这里补上
+                for ((name, ddl) in triggerDdls(item, fts, triggerNames)) {
+                    try {
+                        db.execSQL(ddl)
+                        created += name
+                        ok++
+                    } catch (t: Throwable) {
+                        lastError = describe(t)
+                    }
+                }
+                capability = if (ok < 3) {
+                    ProbeOutcome.AppSync("trigger_create", lastError)
+                } else {
+                    functionalChecks(db, fts, item)
+                }
+            } catch (t: Throwable) {
+                // 建 FTS 就失败 → NONE；建到一半失败 → APP_SYNC（能力部分可用）
+                capability = if (created.isEmpty()) {
+                    ProbeOutcome.None("fts4_create", describe(t))
+                } else {
+                    ProbeOutcome.AppSync("probe_exception", describe(t))
+                }
+            }
+        } finally {
+            cleanupErrors = dropAll(db, created)        // 绝不 runCatching 吞掉；错误逐条收集
+        }
+
+        // ── 关键：清理之后才判断结果。任一残留/清理失败 → 降级，且不缓存 TRIGGER ──
+        val residue = findResidue(db)
+        if (residue.isNotEmpty() || cleanupErrors.isNotEmpty()) {
+            return ProbeOutcome.AppSync(
+                "cleanup_failed",
+                (cleanupErrors + residue.map { "residue:$it" }).joinToString(";")
+            )
+        }
+        return capability
+    }
+
+    private fun functionalChecks(db: SQLiteDatabase, fts: String, item: String): ProbeOutcome {
+        val before = count(db, fts)
+        fun fail(step: String) = ProbeOutcome.AppSync("functional_$step", "fts=$fts")
+
+        db.execSQL("INSERT INTO $item(id, search_text, status) VALUES(?, ?, 'ACTIVE')",
+            arrayOf(1, SENTINEL))
+        if (count(db, fts) != before + 1) return fail("insert")
+        if (!matches(db, fts, "\"会议\" \"提醒\"")) return fail("insert_match")
+
+        db.execSQL("UPDATE $item SET search_text=? WHERE id=1", arrayOf("快递 递到 到了"))
+        if (matches(db, fts, "\"会议\"")) return fail("stale_term")
+        if (!matches(db, fts, "\"快递\"")) return fail("new_term")
+
+        db.execSQL("UPDATE $item SET status='DELETED' WHERE id=1")
+        if (count(db, fts) != before) return fail("soft_delete")
+
+        db.execSQL("UPDATE $item SET status='ACTIVE' WHERE id=1")
+        if (count(db, fts) != before + 1) return fail("restore")
+
+        db.execSQL("DELETE FROM $item WHERE id=1")
+        if (count(db, fts) != before) return fail("hard_delete")
+
+        return ProbeOutcome.TriggerOk
+    }
+
+    private fun dropAll(db: SQLiteDatabase, created: Set<String>): List<String> {
+        val errors = mutableListOf<String>()
+        // 顺序：触发器 → item 表 → FTS 虚拟表（反过来会在 DROP 虚拟表时留下悬空触发器）
+        val order = created.sortedBy { name ->
+            when {
+                name.endsWith("_ai") || name.endsWith("_au") || name.endsWith("_ad") -> 0
+                name.endsWith("_item") -> 1
+                else -> 2
+            }
+        }
+        for (name in order) {
+            try {
+                dropInterceptor?.invoke(name)          // 测试注入点；正常为 null
+                db.execSQL("DROP ${kindOf(name)} IF EXISTS $name")
+            } catch (t: Throwable) {
+                errors += "$name:${describe(t)}"
+            }
+        }
+        return errors
+    }
+
+    private fun findResidue(db: SQLiteDatabase): List<String> =
+        db.rawQuery(
+            "SELECT name FROM sqlite_master WHERE name LIKE '${PREFIX}%' " +
+            "UNION ALL SELECT name FROM sqlite_temp_master WHERE name LIKE '${PREFIX}%'",
+            null
+        ).use { c -> buildList { while (c.moveToNext()) add(c.getString(0)) } }
+
+    private fun kindOf(name: String): String =
+        if (name.endsWith("_ai") || name.endsWith("_au") || name.endsWith("_ad")) "TRIGGER" else "TABLE"
+
+    private fun journalMode(db: SQLiteDatabase): String =
+        db.rawQuery("PRAGMA journal_mode", null).use { if (it.moveToFirst()) it.getString(0).lowercase() else "" }
+
+    private fun count(db: SQLiteDatabase, fts: String): Int =
+        db.rawQuery("SELECT COUNT(*) FROM $fts", null).use { if (it.moveToFirst()) it.getInt(0) else -1 }
+
+    private fun matches(db: SQLiteDatabase, fts: String, expr: String): Boolean =
+        db.rawQuery("SELECT COUNT(*) FROM $fts WHERE $fts MATCH ?", arrayOf(expr))
+            .use { it.moveToFirst() && it.getInt(0) > 0 }
+
+    private fun describe(t: Throwable): String =
+        t.javaClass.simpleName + ": " + (t.message ?: "").take(80)
+}
+```
+
+`detectFtsMode` 只负责"探测 + 缓存 + 返回"，**缓存写在探测返回之后**：
+
+```kotlin
+fun detectFtsMode(db: SQLiteDatabase, cache: FtsModeCache?, dbVersion: Int, now: Long): FtsMode {
+    cache?.get(dbVersion, sqliteVersion(db), db)?.let { return it }
+    val sqlite = sqliteVersion(db)
+
+    return when (val outcome = FtsProbe.probe(db)) {
+        is ProbeOutcome.TriggerOk -> {
+            cache?.put(FtsMode.TRIGGER, dbVersion, sqlite, now)
+            FtsMode.TRIGGER
+        }
+        is ProbeOutcome.None -> {
+            cache?.put(FtsMode.NONE, dbVersion, sqlite, now)
+            FtsMode.NONE
+        }
+        is ProbeOutcome.AppSync -> {
+            if (outcome.reason in NON_CACHEABLE) {
+                cache?.invalidate()      // 不缓存：下次开库必须重试，且 ensureAll 会先清残留
+            } else {
+                cache?.put(FtsMode.APP_SYNC, dbVersion, sqlite, now)
+            }
+            Log.w(TAG, "ftsMode=APP_SYNC（${outcome.reason}）：${outcome.detail}")
+            FtsMode.APP_SYNC
+        }
     }
 }
 ```
 
-四点必须照做：
+#### 五条必须照做的约束
 
-1. **`finish()` 里写缓存**（模式 + `DB_VERSION` + `sqlite_version()` + 时间），只在 `finally` 之前调用一次；
-2. **任何异常都落 `APP_SYNC`，绝不落 `TRIGGER`**——这正是 C1-A 的负向对照教的事；
-3. 哨兵行用 `id=1`，探测表是新建的，不会与真实数据冲突；
-4. 探测在 `onCreate`/`onOpen` 里只跑一次（缓存命中则跳过），且**不在主线程之外另起连接**。
+1. **`TriggerOk` 只能在"清理完成 + 残留为空"之后产生**，不能在 `try` 里提前 `return`。v3 的 `finish(TRIGGER)` 就是把"结论"和"清理"的顺序弄反了。
+2. **清理错误不许吞**。`dropAll` 逐条 `try/catch` 并**收集**错误；`runCatching { … }` 这种"失败即静默"的写法在清理路径上是禁止的。
+3. **残留检查按前缀扫两张系统表**：`sqlite_master` 与 `sqlite_temp_master`。只扫 main 会漏掉未来有人改成 TEMP 的版本；只按具体名字查会漏掉"建到一半、名字不同"的对象。
+4. **清理失败 / WAL → `APP_SYNC` 且不写缓存**。允许降级，不允许把降级固化成永久结论——否则用户关掉 WAL 或清掉残留后，永远回不到 `TRIGGER`。
+5. **探测对象放 main schema，不放 TEMP**。TEMP 对象在连接关闭时自动消失，会把"清理失败"这个 bug 藏起来；放 main 才能让下一次启动的 `ensureAll` 扫到并强制清理。
 
-> **`sqliteVersion(db)` 必须用探测的这条连接读**，不能查 `Build.VERSION` 或缓存的静态值——同一台设备上不同连接读到的是同一个 `sqlite_version()`，但如果哪天换了库（例如以后引入自带 SQLite），静态值会说谎。一次 `SELECT sqlite_version()` 成本可忽略。
+#### 故障注入怎么测（对应 `T-S25`–`T-S28`）
 
-### 6.2.1 探测与缓存的关系（P0-4，v3 新增）
+| 编号 | 注入 | 期望 |
+|---|---|---|
+| `T-S25` | `dropInterceptor = null`（正常） | 返回 `TriggerOk`；`sqlite_master` 无 `zhuli_fts_probe_%`；缓存写入 `TRIGGER` |
+| `T-S26` | 拦截器对 `*_ai` 抛异常（模拟 `DROP TRIGGER` 失败） | 返回 `AppSync("cleanup_failed")`；**缓存没有 `TRIGGER`**；残留对象在断言后被测试清理 |
+| `T-S27` | 拦截器对 `*_item` 抛异常（模拟 `DROP TABLE` 失败） | 同上 |
+| `T-S28` | 拦截器静默跳过 `*_ai` 的 DROP（不抛、不删） | 同上（靠 `findResidue` 抓到残留，而不是靠异常） |
+
+> 拦截器是 `internal var`，只在本模块可见；生产代码里没有任何赋值点（`grep "dropInterceptor"` 期望只有声明与 `dropAll` 里的一处使用 + 测试文件）。这条写进 §8.5.2 的自检。
+
+#### 两个容易忽略的细节
+
+- **`sqliteVersion(db)` 必须用探测的这条连接读**，不能查 `Build.VERSION` 或缓存静态值。同一台设备上不同连接读到的是同一个 `sqlite_version()`，但如果哪天换了库（例如以后引入自带 SQLite），静态值会说谎。一次 `SELECT sqlite_version()` 成本可忽略。
+- **探测表名只含 ASCII**：`zhuli_fts_probe_<nanoTime>_<seq>` 全是字母数字下划线，直接拼进 DDL 是安全的；**禁止**把任何用户输入拼进这些名字（这是唯一一处允许字符串拼 SQL 的地方，因为表名不能绑定参数）。
+
+### 6.2.1 探测与缓存的关系（v3 P0-4）
 
 v2 只有一句 `cache?.get()?.let { return it }`，把"缓存命中"当成了"结论可信"。**缓存只是一个加速器，不是一个真相源**。三件事必须写清：
 
@@ -1695,7 +2077,7 @@ v2 只有一句 `cache?.get()?.let { return it }`，把"缓存命中"当成了"�
 |---|---|---|
 | 缓存里的 `db_version == 当前 DB_VERSION` | `prefs.getInt(KEY_DB_VERSION, -1)` | 升级后仍用旧结论；v17 新增了触发器但缓存还是 v16 的 `NONE` |
 | 缓存里的 `sqlite_version == 当前 sqlite_version()` | `prefs.getString(KEY_SQLITE, "")` | 系统 OTA 换了 SQLite（比如从 3.42 到 3.45），`trusted_schema` 默认值可能变，结论失效 |
-| **缓存的 `TRIGGER` 档必须额外校验 3 个触发器真实存在** | 查 `sqlite_master` 的 3 个名字 | 缓存说 TRIGGER、触发器被删（清库/部分恢复）→ `MemoryStore` 不调 `syncFts`，**索引永久不同步且无人发现** |
+| **缓存的 `TRIGGER` 档必须额外校验 3 个触发器"存在且定义正确"** | `verifyFtsTriggers(db)`：名称 + 所属表 + 事件 + SQL 归一化全等（§6.4） | 缓存说 TRIGGER、触发器被删/被改坏（清库、部分恢复、旧版本 DDL 漂移）→ `MemoryStore` 不调 `syncFts`，**索引永久不同步且无人发现** |
 
 第三条是 v3 新增的、也是最容易漏的一条。前两条是"环境变了要重探"，第三条是"结论本身被破坏了要重探"。
 
@@ -1707,56 +2089,91 @@ v2 只有一句 `cache?.get()?.let { return it }`，把"缓存命中"当成了"�
 | `APP_SYNC`（FTS 能建、触发器不行/不同步） | 写 | 功能正确、只是慢；不需要每次开库都花 80ms 重探 |
 | `NONE`（FTS4 建不出） | 写 | 同上 |
 | 探测过程中抛未预期异常 | **写 `APP_SYNC`**，不写 `TRIGGER` | 保守：宁可慢，不可错。异常原因进日志 |
+| **清理失败 / 有残留**（`cleanup_failed`） | **不写任何缓存** | 现场没弄干净，结论不可信；下次开库必须重试，`ensureAll` 先清残留 |
+| **WAL 打开**（`wal`） | **不写任何缓存** | 连接池 >1，`trusted_schema` 一致性无法保证；关掉 WAL 后必须能自动回到 TRIGGER |
 
-**③ 连接级配置变化怎么处理**
+**③ 连接一致性：从"假设"变成"可证明 + 运行期断言"（P1-6，v4 重写）**
 
-`trusted_schema` 是**连接级** pragma（C1-A §5 已证：`PRAGMA trusted_schema=OFF` 后触发器"建得成、写才炸"）。C1-A §7.2 因此要求"探测与使用同一连接"。C1-B 的处理：
+v3 的写法是"假定本进程内没有第三方在任何连接上改过 `trusted_schema`；C1 代码里没有 → 假设成立"。**这不是证明，而且在并发下不成立**：`SQLiteDatabase` 的连接池会给不同线程分配不同连接，逐条连接的 pragma 不会互相同步。
 
-| 层 | 做法 |
-|---|---|
-| 同一 `SQLiteDatabase` 实例 | 探测用 `onOpen(db)` 的 `db`；`MemoryStore` 用 `db.writableDatabase`。两者是**同一个 `SQLiteDatabase` 对象**（helper 的 `mDatabase`），但不是同一条底层连接（连接池按线程分配） |
-| 无法保证"同一条连接" | `SQLiteDatabase` 的连接池在并发时会给不同线程不同连接；`trusted_schema` 不在 `SQLiteDatabaseConfiguration` 里，无法通过 open 参数统一设置 |
-| 因此的结论 | 探测结论是**库级假设**：假定"本进程内没有第三方在任何连接上改过 `trusted_schema`"。C1 的代码里没有任何地方改它 → 假设成立 |
-| 若假设被破坏 | 只能靠 `selfCheck` 的第 1/2 条（FTS 与 item 不一致）在事后发现，不能事前阻止。**这是 U-12，写进 §19.3** |
+v4 分三层处理，每层都有可执行的核查方式：
+
+| 层 | 事实 | 依据 / 核查 |
+|---|---|---|
+| **1. 池大小** | **非 WAL 时，连接池最大连接数恒为 1**；只有开了 `ENABLE_WRITE_AHEAD_LOGGING` 才会 >1 | AOSP `SQLiteConnectionPool.setMaxConnectionPoolSizeLocked()`：非内存库且未开 WAL → `mMaxConnectionPoolSize = 1` |
+| **2. 运行期断言** | `detectFtsMode` 第一步：`isWriteAheadLoggingEnabled` → `AppSync("wal")`，不写缓存；`MemoryStore` 的每个写事务入口在 debug 构建断言同一条件 | 公开 API `SQLiteDatabase.isWriteAheadLoggingEnabled`（API 16+）；测试 `T-S31` |
+| **3. 迁移闸门** | `journal_mode ∈ {delete, truncate, persist}` 才允许迁移（§5.12） | 迁移后仍是单连接池；`T-M50` / `T-M51` |
+
+结论要说得精确：**在本方案允许的状态下（回滚日志族 + 未开 WAL），不是"假设探测与写入碰巧在同一条连接"，而是"池里只有一条连接"**。C1-A 的"探测与使用同一连接"约束因此是被**结构性满足**的，不依赖调用顺序，也不依赖线程调度。
+
+**残余风险只有一个**，且是 fail-loud 的：探测之后、某次写入之前，同进程内有代码在这条唯一连接上执行 `PRAGMA trusted_schema=OFF`。后果是触发器在写入时**直接抛** `SQLiteException: unsafe use of virtual table "zhuli_memory_fts"`——不是静默漏写。C1 代码里没有任何 `trusted_schema` 写入（`grep -rn "trusted_schema" app/src/main` 期望 0），而且这个 pragma 只有显式执行才会变。U-12 因此从"可能静默不一致"收窄为"第三方显式改 pragma 会立刻炸"（§19.3）。
+
+**多连接/多线程验证（`T-N06`）**：8 个线程各做 50 次 `insert` + `softDelete`，每个线程进入时读一次 `PRAGMA trusted_schema` 与 `PRAGMA journal_mode`，断言：
+
+1. 8 个线程读到的两个值**完全一致**（若池里真有多条连接且配置漂移，这一条会失败）；
+2. 全部写入不抛异常；
+3. 结束时 `COUNT(fts) == COUNT(item WHERE status<>'DELETED')`；
+4. `PRAGMA integrity_check = ok`。
+
+这条测试同时覆盖 `T-N01`–`T-N05` 没覆盖的"多线程 × FTS 一致性"组合。
 
 **④ 降级条件（明确"什么时候允许降"）**
 
 ```
-FTS4 虚拟表建不出            → NONE      （能力缺失，只能 LIKE）
-FTS4 建出、触发器 < 3        → APP_SYNC  （能力部分缺失，Store 兜底）
-FTS4 + 触发器都建出但不同步   → APP_SYNC  （C1-A 的"建成功、写才炸"就是这一类）
-探测代码自身抛异常            → APP_SYNC  （不赌，见上表第 4 行）
+FTS4 虚拟表建不出            → NONE      （能力缺失，只能 LIKE；缓存）
+FTS4 建出、触发器 < 3        → APP_SYNC  （能力部分缺失，Store 兜底；缓存）
+FTS4 + 触发器都建出但不同步   → APP_SYNC  （C1-A 的"建成功、写才炸"就是这一类；缓存）
+探测代码自身抛异常            → APP_SYNC  （不赌；缓存）
+清理失败 / 有残留             → APP_SYNC  （现场不干净；**不缓存**）
+WAL 已打开（池 >1）           → APP_SYNC  （连接一致性无法保证；**不缓存**）
 ```
 
 **唯一不允许的降级**：从 `APP_SYNC` 降到 `NONE`。`NONE` 只由"FTS4 建不出"触发，不能因为"触发器不行"就给 `NONE`——那会白白丢掉 FTS 的检索能力。
 
-### 6.3 三档下的写路径差异（P0-5，v3 重写）
+### 6.3 三档下的写路径差异（v3 P0-5）
 
-**完整职责表**（v3 补齐：v2 只列了 4 个写路径，漏了 `confirm` / `resolveConflict` / `expire`——这三条都改 `status`，`APP_SYNC` 下漏调就是"确认了但还是搜不到"）：
+**完整职责表**（v3 补齐了 `confirm` / `resolveConflict` / `expire`；**v4 删掉了 `expire`**——C1-B 不实现该方法，见 §7.2 的方案 B，剩下的 6 条写路径正好覆盖 `MemoryStore` 的全部写方法）：
 
 | # | 路径 | 改动的列 | `TRIGGER` | `APP_SYNC` | `NONE` |
 |---|---|---|---|---|---|
-| 1 | `insert`（新建行） | 插入 `search_text` + `status` | 触发器 `_ai` 负责 | **`syncFts(id)`** | 只写 `search_text` |
-| 2 | `correct`（新建行 + 旧行失效） | 新行 INSERT；旧行 `status`/`valid_until` | `_ai` + `_au` | **两次 `syncFts`**（新 id、旧 id） | 只写 `search_text` |
-| 3 | `confirm` | `status` CANDIDATE→ACTIVE | `_au` | **`syncFts(id)`** | 不碰 FTS |
-| 4 | `resolveConflict` | `status`→SUPERSEDED | `_au` | **`syncFts(id)`** | 不碰 |
-| 5 | `expire`（TASK 到期/STATE 关闭） | `status`→EXPIRED + `valid_until` | `_au` | **`syncFts(id)`** | 不碰 |
-| 6 | `softDelete` | `status`→DELETED | `_au`（把该 rowid 从 FTS 删掉） | **`syncFts(id)`**（幂等：先删后插，因 status=DELETED 不再插） | 不碰 |
-| 7 | `restore` | `status`→target | `_au` | **`syncFts(id)`** | 不碰 |
-| 8 | `touchUsed` | `times_retrieved` / `last_used_at` | **不触发**（`_au` 限定 `OF search_text, status`） | 不调 | 不碰 |
-| 9 | 迁移灌数据（§5.2 第 7–9 步） | 批量 INSERT | **先 `INSERT…SELECT` 灌完，再建触发器** | 同左（灌完靠运行期 `APP_SYNC` 维护增量） | 跳过，只保证 `search_text` 已写 |
-| 10 | 硬删（C3） | 物理删行 | `_ad` | `syncFts` 或直接 DELETE | 不碰 |
+| 1 | `insert`（新建行） | 插入 `search_text` + `status` | 触发器 `_ai` 负责 | **`afterWrite(id)` → `syncFts(id)`** | 只写 `search_text` |
+| 2 | `correct`（新建行 + 旧行失效） | 新行 INSERT；旧行 `status`/`valid_until` | `_ai` + `_au` | **`afterWrite(newId, oldId)`**（两次 `syncFts`） | 只写 `search_text` |
+| 3 | `confirm` | `status` CANDIDATE→ACTIVE | `_au` | **`afterWrite(id)`** | 不碰 FTS |
+| 4 | `resolveConflict` | `status`→SUPERSEDED | `_au` | **`afterWrite(dropId)`** | 不碰 |
+| 5 | `softDelete` | `status`→DELETED | `_au`（把该 rowid 从 FTS 删掉） | **`afterWrite(id)`**（幂等：先删后插，因 status=DELETED 不再插） | 不碰 |
+| 6 | `restore` | `status`→target | `_au` | **`afterWrite(id)`** | 不碰 |
+| 7 | `touchUsed` | `times_retrieved` / `last_used_at` | **不触发**（`_au` 限定 `OF search_text, status`） | 不调 | 不碰 |
+| 8 | 迁移灌数据（§5.2 第 7–9 步） | 批量 INSERT | **先 `INSERT…SELECT` 灌完，再建触发器** | 同左（灌完靠运行期 `APP_SYNC` 维护增量） | 跳过，只保证 `search_text` 已写 |
+| 9 | 硬删（C3） | 物理删行 | `_ad` | `syncFts` 或直接 DELETE | 不碰 |
 | — | 检索 | — | `MATCH` | `MATCH` | `LIKE` 兜底 |
 
 **三条不变量（"不双写、不漏写"的可检验形式）**：
 
 | # | 不变量 | 怎么验 |
 |---|---|---|
-| **W-1** | `TRIGGER` 档下，`MemoryStore` **一次都不调** `syncFts` | `grep -n "syncFts" MemoryStore.kt` 的每处都在 `if (ftsMode == APP_SYNC)` 分支内；`T-S21`（v3 新增）断言"TRIGGER 档下写一次只产生 1 条 FTS 行"（若双写会变成 2 条或抛约束） |
-| **W-2** | `APP_SYNC` 档下，**凡改 `status` 或 `search_text` 的语句，同一事务内必有一次 `syncFts`** | 上表 1–7 共 7 条路径，每条一个用例；`T-S22`（v3 新增）用"逐条路径写完就查 FTS 行数"的方式断言 |
+| **W-1** | `TRIGGER` 档下，`MemoryStore` **一次都不调** `syncFts` | `syncFts` 只允许出现在 `afterWrite()` 内部；`afterWrite` 第一行 `if (ftsMode != APP_SYNC) return`。`grep -n "syncFts" MemoryStore.kt` 期望 **2 处**（`afterWrite` 内 1 处调用 + `rebuildFts` 内 1 处）；`T-S21` 断言"TRIGGER 档下写一次只产生 1 条 FTS 行"（若双写会变成 2 条或抛约束） |
+| **W-2** | `APP_SYNC` 档下，**凡改 `status` 或 `search_text` 的语句，同一事务内必有一次 `afterWrite`** | 上表 1–6 共 6 条路径，每条一个用例；`T-S22` 用"逐条路径写完就查 FTS 行数"的方式断言 |
 | **W-3** | 任何档下，`search_text` **都必须写** | `NONE` 档的 LIKE 兜底、`APP_SYNC` 档的 `syncFts`、`TRIGGER` 档的触发器，全部依赖这一列。`T-S23`（v3 新增）在 `NONE` 档下断言 `search_text` 非空且 LIKE 能命中 |
 
-**唯一的写入职责位置**：`syncFts` 只出现在 `MemoryStore` 的**私有方法**里，调用点是上表 1–7 那 7 处。**不许**散落在 `MemoryRepo`、`MemoryIndexer` 或调用方——否则 W-1 / W-2 无法用 grep 验证。
+**唯一的写入职责位置**：`syncFts` 是 `MemoryStore` 的私有方法，**只被 `afterWrite()` 调用**（外加 `rebuildFts()` 的全量重建）。6 条写路径统一调 `afterWrite`，不各自写 `if (ftsMode == APP_SYNC)`——否则 W-1 / W-2 无法用 grep 验证。
+
+```kotlin
+/** 唯一出口：TRIGGER 档由触发器负责，NONE 档没有 FTS，只有 APP_SYNC 需要应用层同步 */
+private fun afterWrite(vararg ids: Long) {
+    if (ftsMode != FtsMode.APP_SYNC) return
+    for (id in ids) syncFts(id)
+}
+```
+
+**`softDelete` 不得直接删 FTS（P1-2，v4 修）**：v3 §7.6 的第 2 步写的是无条件 `DELETE FROM zhuli_memory_fts WHERE rowid=:id`。这在三档下分别出错：
+
+| 档 | 直接 DELETE 的后果 |
+|---|---|
+| `TRIGGER` | 与 `_au` 重复删除；若将来 `_ad` 也要删，会变成"删两次"——幂等掩盖了职责混乱，但 W-1 的 grep 断言直接失效 |
+| `APP_SYNC` | 删了之后没有重新插入的路径（`syncFts` 没被调用），`restore` 时才发现索引缺行 |
+| `NONE` | `zhuli_memory_fts` 可能根本不存在 → `no such table`，软删直接失败 |
+
+v4 的规则：**任何写路径都不直接碰 `zhuli_memory_fts`**，一律 `afterWrite(id)`。这条同样适用于 `insert` / `correct` / `confirm` / `resolveConflict` / `restore`——统一到一处，才能用"`grep "DELETE FROM zhuli_memory_fts" MemoryStore.kt` 期望 1 处（`syncFts` 内）"来验收。
 
 **`deleteFts` 不需要单独存在**：`syncFts` 的实现是"先 `DELETE WHERE rowid=?`，再 `INSERT … SELECT … WHERE status<>'DELETED'`"。当行是 DELETED 时，第二条 INSERT 选不出行，效果等于删除。所以 v2 里的 `deleteFts` 合并进 `syncFts`，API 面从 2 个减到 1 个。
 
@@ -1787,7 +2204,7 @@ LIMIT :limit
 
 `LIKE` 的转义是 v3 新增的注意点：用户搜 `100%` 时，`"%" + kw + "%"` 会变成 `%100%%`，把所有以 100 开头的行都捞出来。必须 `kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")` 后再拼。
 
-### 6.4 `FtsModeCache` 的完整契约（P0-4，v3 重写）
+### 6.4 `FtsModeCache` 的完整契约（v3 P0-4）
 
 v2 只列了 3 个键和"失效条件见下"，没有一个可实现的 `get()`。v3 把它写成一个有明确返回值的函数——**缓存只返回"可信的结论"或 `null`，绝不返回"可能过期的结论"**。
 
@@ -1812,15 +2229,119 @@ fun get(dbVersion: Int, sqliteVersion: String, db: SQLiteDatabase): FtsMode? {
     if (prefs.getInt(KEY_DB_VERSION, -1) != dbVersion) return null
     // 4) SQLite 版本变了
     if (prefs.getString(KEY_SQLITE, null) != sqliteVersion) return null
-    // 5) 结论是 TRIGGER，但 3 个触发器不在了 → 结论已失效
-    if (mode == FtsMode.TRIGGER && countFtsTriggers(db) != 3) return null
+    // 5) 结论是 TRIGGER，但 3 个触发器不在了 / 定义不对 → 结论已失效（P1-5）
+    if (mode == FtsMode.TRIGGER && !verifyFtsTriggers(db)) return null
     // 6) 结论不是 NONE，但 FTS 虚拟表不在了 → 结论已失效
     if (mode != FtsMode.NONE && !tableExists(db, "zhuli_memory_fts")) return null
     return mode
 }
 ```
 
-第 5、6 道门是 v3 新增的**结构一致性校验**，也是这套缓存唯一"防得住"的地方：`ensureAll` 会补建表和触发器，但如果补建失败（磁盘满、ROM 限制），缓存仍然说 `TRIGGER`，而实际没有触发器 → `MemoryStore` 永远不调 `syncFts` → **索引静默不同步**。第 5/6 道门把这种情况变成"重探一次"，代价 80ms，收益是"不会静默坏掉"。
+第 5、6 道门是**结构一致性校验**，也是这套缓存唯一"防得住"的地方：`ensureAll` 会补建表和触发器，但如果补建失败（磁盘满、ROM 限制），缓存仍然说 `TRIGGER`，而实际没有触发器 → `MemoryStore` 永远不调 `syncFts` → **索引静默不同步**。第 5/6 道门把这种情况变成"重探一次"，代价 80ms，收益是"不会静默坏掉"。
+
+v3 的第 5 道门只数了触发器个数（`countFtsTriggers(db) != 3`）。**个数对不代表定义对**，v4 换成 `verifyFtsTriggers`，判定口径见下。
+
+#### 6.4.1 `verifyFtsTriggers`：数量对不代表定义对（P1-5）
+
+三个触发器可能同时满足"数量=3"却是错的：
+
+- 挂在别的表上（`tbl_name` 错）；
+- 事件类型错（`_au` 少了 `OF search_text, status`，于是 `touchUsed` 每次都触发全行 DELETE+INSERT）；
+- 触发器体错（`_ai` 写 `rowid` 时用了 `new.rowid` 而不是 `new.id`；`_au` 的第二条 INSERT 漏了 `WHERE new.status <> 'DELETED'`）。
+
+更糟的是 `CREATE TRIGGER IF NOT EXISTS`：对象已存在时它**静默跳过**，所以"建表成功"不能证明"定义正确"。
+
+**必须核四件事**：
+
+| # | 核什么 | 怎么核 | 不通过的含义 |
+|---|---|---|---|
+| 1 | 名称集合恰好 3 个 | 按三个固定名查 `sqlite_master`，行数必须 = 3 | 缺一个（被删）/ 只有两个（建到一半） |
+| 2 | 所属表 | `tbl_name == 'zhuli_memory_item'` | 挂错表（旧命名冲突、探测残留） |
+| 3 | 事件类型 | 从 `sql` 解析：`_ai` → `AFTER INSERT ON`；`_au` → `AFTER UPDATE OF search_text, status ON`；`_ad` → `AFTER DELETE ON` | 少 `OF` → `touchUsed` 放大成 FTS 全行重写 |
+| 4 | 定义逐字等价 | `normalizeTriggerSql(sql)` 与常量全等 | 触发器体被改坏（漏 `status<>'DELETED'`、`rowid` 写错） |
+
+**归一化口径（写死，避免"实现者各写一套"）**：
+
+```kotlin
+internal fun normalizeTriggerSql(raw: String): String =
+    raw.replace(Regex("(?i)\s+IF\s+NOT\s+EXISTS"), "")  // 常量里有、sqlite_master 里没有
+        .replace(Regex("\s+"), " ")                        // 换行/缩进归一
+        .trim()
+        .trimEnd(';')
+        .lowercase()                                        // SQL 关键字大小写无语义
+```
+
+> 已核对 `sqlite_master` 的实际形态：`CREATE TRIGGER IF NOT EXISTS zhuli_memory_fts_ai …` 存进去后是 `CREATE TRIGGER zhuli_memory_fts_ai AFTER INSERT ON …`（`IF NOT EXISTS` 被去掉，换行与缩进原样保留）。所以必须归一化后比对，否则永远误报。
+
+**完整实现（`MemorySchema.kt` 内）**：
+
+```kotlin
+internal object FtsTriggers {
+    const val AI = "zhuli_memory_fts_ai"
+    const val AU = "zhuli_memory_fts_au"
+    const val AD = "zhuli_memory_fts_ad"
+    private const val TABLE = "zhuli_memory_item"
+    private const val FTS = "zhuli_memory_fts"
+
+    /** 唯一 DDL 来源：createFtsTriggers 与 verify 都从这里取，禁止第二份 */
+    val EXPECTED: Map<String, String> = mapOf(
+        AI to "CREATE TRIGGER $AI AFTER INSERT ON $TABLE BEGIN " +
+            "INSERT INTO $FTS(rowid, search_text) VALUES (new.id, new.search_text); END",
+        AU to "CREATE TRIGGER $AU AFTER UPDATE OF search_text, status ON $TABLE BEGIN " +
+            "DELETE FROM $FTS WHERE rowid = old.id; " +
+            "INSERT INTO $FTS(rowid, search_text) " +
+            "SELECT new.id, new.search_text WHERE new.status <> 'DELETED'; END",
+        AD to "CREATE TRIGGER $AD AFTER DELETE ON $TABLE BEGIN " +
+            "DELETE FROM $FTS WHERE rowid = old.id; END",
+    )
+
+    fun verify(db: SQLiteDatabase): Boolean {
+        val rows = HashMap<String, Pair<String, String>>()
+        db.rawQuery(
+            "SELECT name, tbl_name, sql FROM sqlite_master " +
+                "WHERE type='trigger' AND name IN (?,?,?)",
+            arrayOf(AI, AU, AD)
+        ).use { c ->
+            while (c.moveToNext()) {
+                rows[c.getString(0)] = c.getString(1) to (c.getString(2) ?: "")
+            }
+        }
+        if (rows.size != EXPECTED.size) return false
+        return EXPECTED.all { (name, expected) ->
+            val (tbl, sql) = rows[name] ?: return@all false
+            tbl == TABLE && normalizeTriggerSql(sql) == normalizeTriggerSql(expected)
+        }
+    }
+
+    /** 定义不对就整体重建；失败返回 false，由调用方清缓存让下次重探 */
+    fun repair(db: SQLiteDatabase): Boolean = try {
+        for (name in listOf(AI, AU, AD)) db.execSQL("DROP TRIGGER IF EXISTS $name")
+        MemorySchema.createFtsTriggers(db)      // 内部用 EXPECTED，不另写 DDL
+        verify(db)
+    } catch (t: Throwable) {
+        Log.w(TAG, "触发器重建失败：${t.javaClass.simpleName}: ${t.message?.take(80)}")
+        false
+    }
+}
+```
+
+**`ensureAll` 的修复策略**（按缓存状态分，避免"把 APP_SYNC 偷偷改成 TRIGGER"）：
+
+| 启动时的状态 | `ensureAll` 做什么 | 之后 |
+|---|---|---|
+| FTS 表缺失 | `createFtsTable` | 清缓存 → 下次重探 |
+| 缓存说 `TRIGGER`，触发器缺 / 定义错 | `FtsTriggers.repair` | 清缓存（无论 repair 成败；失败时下次探测会降 APP_SYNC） |
+| 缓存说 `APP_SYNC` / `NONE` | **不重建触发器**（那不是这一档的结论） | 不动缓存 |
+| 无缓存（首装/刚升级） | 表在、触发器在就什么都不做 | 交给探测判定 |
+| 三个触发器都在且定义对 | 不动 | 缓存可命中（仍须过 `get()` 的四项校验） |
+
+**为什么"先删后建"而不是 `IF NOT EXISTS` 补建**：`IF NOT EXISTS` 在对象存在时是空操作，定义错了它不会改。只有 `DROP` + `CREATE` 能换掉错误定义；删除范围仅限这三个固定名字，不碰其他触发器。
+
+**验收（`T-S29` / `T-S30`）**：
+
+- `T-S29`：三个都在、数量=3，但把 `_au` 改成 `AFTER UPDATE ON`（去掉 `OF`）→ `verifyFtsTriggers` = false → 缓存失效 → 重探并 `repair` → 再次 verify = true；额外断言 `touchUsed` 不再改变 FTS 行数（证明 `OF` 真的生效）。
+- `T-S30`：把 `_ai` 挂到 `zhuli_memory_source`（`tbl_name` 错）→ 同样失效并修复。
+- 两条都不允许"因为 `CREATE TRIGGER` 没抛错就算通过"。
 
 **`put()` 的写法**：先写 `KEY_MODE` 最后写——这样任何写一半的崩溃都表现为"没有 mode 键"或"版本不匹配"，被 `get()` 判为 `null`，不会出现"有 mode 但没有版本"的半状态。
 
@@ -1873,6 +2394,8 @@ SELECT id FROM zhuli_memory_item i WHERE i.status<>'DELETED'
 | 4 | 探测失败后静默继续 | 索引不一致会让检索"看起来正常但漏结果" |
 | 5 | 用 Robolectric 的结果决定模式 | A-2 已证伪（Robolectric 复现不出失败，方向都相反） |
 | 6 | `ftsMode=NONE` 时跳过 `search_text` 的写入 | 那是 LIKE 兜底的唯一依据 |
+| 7 | 用 `CREATE TRIGGER IF NOT EXISTS` 的返回当"触发器正确" | 对象已存在时它是空操作；定义错了也不报。必须 `verifyFtsTriggers`（§6.4.1） |
+| 8 | 在任何写路径里直接 `DELETE FROM zhuli_memory_fts` | 绕过 `afterWrite` 的档位分支：TRIGGER 档重复、APP_SYNC 档删了不补、NONE 档表可能不存在（§6.3） |
 
 ---
 
@@ -1943,6 +2466,17 @@ class MemoryStore(private val db: InboxDatabase) {
 }
 ```
 
+**C1-B 不提供 `expire()`（P1-3，方案 B）**。v3 在 §6.3 的写路径表、§7.5 的状态转换、§10.12 的 `T-S22` 里都写了 `expire(id, now)`，但 §7.2 的 API 清单与 §7.3 的事务表里没有它——"文档要求实现、接口却不存在"。v4 的选择与理由：
+
+| 项 | 结论 |
+|---|---|
+| C1-B 是否实现 | **否**。C1-B 的写方法就是上表 6 个（`insert` / `correct` / `confirm` / `resolveConflict` / `softDelete` / `restore`）+ `touchUsed` |
+| 为什么 | 它是**维护型批量操作**（TASK 到期、STATE 关闭），需要定时触发、批量扫描、失败重试；C1-B 不引入调度器、不改 `AgentLoop`、不做 UI，硬加一个"只能手动调、没人调"的 API 只会扩大 diff 面 |
+| C1 里 `EXPIRED` 怎么产生 | 只由 `insert` 的 R4a（插入时 `UB>0 AND UB<=now`）产生，状态转换见 §7.5.1 第 6 条 |
+| `EXPIRE` revision | C1-B **不产生**；枚举值保留给 C2，避免 C2 改库 |
+| 归属 | **C2**（与"定期整理/衰减"同一批维护任务，见 §17 第 5 行）；`T-S22` 的 7 条路径同步降为 6 条 |
+| 双跑判据 | 从"7 个写方法"改为"6 个写方法"（§10.11.2） |
+
 `MemoryDraft` 是 `[实现补充]`——C0.2 用 `draft` 这个词但没定义。字段：
 
 ```kotlin
@@ -2008,7 +2542,7 @@ v2 的代码块里有 5 个 `data class/object`，正文却写"四种结果直�
 | `correct` | 读旧行 → 写新行（继承）→ 旧行 `SUPERSEDED` + `valid_until` → `CORRECTS` → 两条 revision | 入向量队列 |
 | `confirm` | 读 → 校验 CANDIDATE → 改 ACTIVE + `last_confirmed_at` → revision(`CONFIRM`) | 入队 |
 | `resolveConflict` | 读两行 → `drop` 改 SUPERSEDED + `invalidated_at` → `SUPERSEDES` → revision | 删 drop 的向量 |
-| `softDelete` | 读 `pre` → 改 DELETED（`pre_delete_status` 仅首次、`invalidated_at` 仅 0）→ 删 FTS/向量/队列 → revision(`DELETE`) | `optimize`（C3 才做） |
+| `softDelete` | 读 `pre` → 改 DELETED（`pre_delete_status` 仅首次、`invalidated_at` 仅 0）→ 删向量/队列 → `afterWrite(id)`（**不直接删 FTS**）→ revision(`DELETE`) | `optimize`（C3 才做） |
 | `restore` | 读 → 定 `target` → 查 `dedupe_key` → 查槽位 → 改状态 → 关系 → revision(`RESTORE`) | 入队（仅 ACTIVE） |
 | `touchUsed` | 单条 UPDATE（不含 `search_text`/`status`，所以不触发 FTS） | — |
 
@@ -2028,7 +2562,7 @@ v2 的代码块里有 5 个 `data class/object`，正文却写"四种结果直�
 
 **`[实现补充]` 并发测试**：`T-D31` 的变体——两个线程同时对同一 `dedupe_key` 调 `insert`，断言最终只有 1 条 ACTIVE、另一条走 `Reinforced` 或被 SQLite 的写锁串行化后命中 R2。这条加进 `MemoryStoreTest`，不占 57 条的编号（属于"实现质量"而非"架构用例"）。
 
-### 7.5 完整状态转换表（P1-4，v3 重写）
+### 7.5 完整状态转换表（v3 P1-4）
 
 v2 的矩阵有三个问题：① 单元格混写"方法 + 结果"（`restore` 的 `Demoted` 写在 `to=CANDIDATE` 格子里，但它其实是"restore 的一个返回值"）；② `CANDIDATE → SUPERSEDED` 写"R7(替代候选? 否)"，等于没定；③ `CANDIDATE → REJECTED` 写"（C2）"，但没写清 C1 到底允许不允许。v3 拆成"合法转换"与"禁止转换"两张表，每条转换都有 SQL 前置条件。
 
@@ -2041,7 +2575,7 @@ v2 的矩阵有三个问题：① 单元格混写"方法 + 结果"（`restore` �
 | 3 | `CANDIDATE` | `ACTIVE` | `confirm(id, now)` | `status='CANDIDATE'` | `last_confirmed_at=now`、`invalidated_at=0`、入向量队列 | `CONFIRM` |
 | 4 | `CANDIDATE` | `SUPERSEDED` | `resolveConflict(keep, drop, now)` 的 drop 方 | `status='CANDIDATE'` | `superseded_by=keep`、`invalidated_at=now`、`SUPERSEDES` 关系 | `RESOLVE` |
 | 5 | `ACTIVE` | `SUPERSEDED` | ① `insert` 的 R7（新值 rank 更高）② `correct()` 的旧行 ③ `resolveConflict()` 的 drop 方 | `status='ACTIVE'` | `superseded_by`、`invalidated_at=now`；`correct` 还要 `valid_until=新起点` | `SUPERSEDE` / `CORRECT` / `RESOLVE` |
-| 6 | `ACTIVE` | `EXPIRED` | ① `insert` 的 R4a（`UB>0 AND UB<=now`）② `expire(id, now)`（TASK 到期 / STATE 关闭） | `status='ACTIVE'` | `valid_until=now`（若还是 0）、`invalidated_at=now` | `EXPIRE` |
+| 6 | `ACTIVE` | `EXPIRED` | **只有** `insert` 的 R4a（`UB>0 AND UB<=now`）；C1-B 没有 `expire()`（§7.2 方案 B） | `status='ACTIVE'` | `valid_until` 保持原值（R4a 插入时就带着过期终点）、`invalidated_at=now` | `CREATE`（不是 `EXPIRE`） |
 | 7 | `ACTIVE` / `CANDIDATE` / `SUPERSEDED` / `EXPIRED` / `REJECTED` | `DELETED` | `softDelete(id, now)` | `status<>'DELETED'` | `pre_delete_status`（仅首次）、`deleted_at=now`、`invalidated_at`（仅 0 时）、删 FTS/向量/队列 | `DELETE` |
 | 8 | `DELETED` | 见下 | `restore(id, now)` | `status='DELETED'` | `deleted_at=0`、`pre_delete_status=''`、`invalidated_at`（回 ACTIVE/CANDIDATE 时置 0） | `RESTORE` |
 | 9 | ∅ | `REJECTED` | **C1 不产生**（无 reject 入口，C2 才有） | — | — | — |
@@ -2059,6 +2593,8 @@ v2 的矩阵有三个问题：① 单元格混写"方法 + 结果"（`restore` �
 | `''`（迁移行 / 异常） | `CANDIDATE` | **不猜**（C0.2 §6.9）；写 `RESTORE` revision 时 `after` 记 `"CANDIDATE"` |
 
 **为什么 `SUPERSEDED` 恢复后仍是 `SUPERSEDED`**：`pre_delete_status` 记录的是"删之前它是什么"，不是"删之前它是不是当前值"。把它恢复成 `ACTIVE` 会让一个槽位出现两个当前值——这正是 C0.2 的缺陷 #3。
+
+> **第 6 条的边界（v4 明确）**：`EXPIRED` 在 C1-B 里只出现在"插入时就已经过期"的场景，不会由"运行中的任务到期"产生。后者的批量处理（扫描 `valid_until <= now` 的 ACTIVE/TASK 行 → 逐条改 EXPIRED + `afterWrite`）是 **C2 的维护任务**，与本表不冲突：C2 实现时新增一条 `ACTIVE → EXPIRED` 的转换，前置条件与这里相同（`status='ACTIVE'`），只是触发者从 `insert` 变成定时任务。
 
 #### 7.5.2 禁止转换（6 条）与失败方式
 
@@ -2101,7 +2637,8 @@ v2 的矩阵有三个问题：① 单元格混写"方法 + 结果"（`restore` �
      invalidated_at = CASE WHEN invalidated_at=0 THEN :now ELSE invalidated_at END,
      updated_at=:now
    WHERE id=:id AND status<>'DELETED'
-2  DELETE FROM zhuli_memory_fts WHERE rowid=:id       // TRIGGER 模式下触发器也做，幂等
+2  afterWrite(id)                                     // TRIGGER 档空操作（_au 负责）；APP_SYNC 档 syncFts；NONE 档空操作
+   // 禁止写死 DELETE FROM zhuli_memory_fts：TRIGGER 档会重复、APP_SYNC 档删了不补、NONE 档表可能不存在（§6.3）
 3  DELETE FROM zhuli_fact_vec WHERE fact_id=:id
 4  DELETE FROM zhuli_vec_queue WHERE fact_id=:id
 5  INSERT revision(change_kind='DELETE', actor='USER',
@@ -2210,6 +2747,7 @@ private fun scopeClause(q: MemoryQuery): Pair<String, Array<String>> {
 | `MemoryContextBuilder`（检索结果注入 prompt） | C3 |
 | 自动冲突裁决（"选一个"） | C2 |
 | 定期整理/合并/衰减 | C4 |
+| `expire()`（TASK 到期 / STATE 关闭的批量过期） | C2（§7.2 方案 B） |
 | 历史聊天回填 | C4 |
 | 墓碑、硬删、`usage` 表、`ingest` 游标 | C3/C4 |
 | PROJECT / CONVERSATION 的写入 | C2/C4 |
@@ -2453,26 +2991,26 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 |---|---|---|---|---|
 | 1 | `app/src/main/java/com/zhuli/memory/MemoryItem.kt` | 190 | B1 | `MemoryType` / `MemoryStatus` / `ConfidenceBasis` / `ScopeType` / `Cardinality` / `TimeConfidence` / `MemoryScope` / `MemoryItem` / `MemorySource` / `MemoryEvidence` / `MemoryDraft` / `InsertResult` / `DeleteResult` / `RestoreResult` |
 | 2 | `app/src/main/java/com/zhuli/memory/MemoryText.kt` | 110 | B1 | `norm` / `searchText` / `queryExpr` / `dedupeKey` / `slotHash` / `sha256Hex` / `LB_SQL` / `UB_SQL` / `MS_PER_DAY` |
-| 3 | `app/src/main/java/com/zhuli/memory/MemorySchema.kt` | 190 | B1+B3 | 7 段 DDL 常量 + `createAll` / `ensureAll` / `createFtsTable` / `createFtsTriggers` / `detectFtsMode` / `FtsModeCache` / `tableExists` |
+| 3 | `app/src/main/java/com/zhuli/memory/MemorySchema.kt` | **250** | B1+B3 | 7 段 DDL 常量 + `createAll` / `ensureAll` / `createFtsTable` / `createFtsTriggers` / **`FtsTriggers`（verify/repair）** / **`FtsProbe`（探测+清理+残留检查）** / `detectFtsMode` / `FtsModeCache` / `tableExists` |
 | 4 | `app/src/main/java/com/zhuli/memory/MemoryGuard.kt` | 90 | B1 | `classify` / `excerpt` / `isValidScope` / `checkLength`（镜像 `SensitiveGuard`，不新建词表） |
 | 5 | `app/src/main/java/com/zhuli/memory/MemoryPolicy.kt` | 140 | B4 | `rank` / `cardinalityOf` / `decide`（R4–R9）/ `R0` 的时间自洽修正 |
-| 6 | `app/src/main/java/com/zhuli/memory/MemoryStore.kt` | 520 | B4 | 7 个写方法 + 9 个查询 + `selfCheck` + `syncFts` + `rebuildFts` |
-| 7 | `app/src/main/java/com/zhuli/memory/MemoryMigrator.kt` | 250 | B2 | 13 步迁移 + 5 条时间断言 + 数量闭合 + 断链 + 合并 + 向量校验 |
+| 6 | `app/src/main/java/com/zhuli/memory/MemoryStore.kt` | **545** | B4 | 6 个写方法 + `touchUsed` + 9 个查询 + `selfCheck` + `syncFts` + `afterWrite` + `rebuildFts` |
+| 7 | `app/src/main/java/com/zhuli/memory/MemoryMigrator.kt` | **305** | B2 | 13 步迁移 + **`MigrationBackup`（备份前的 journal_mode 闸门）** + **三个唯一索引的预检/创建/验证** + 5 条时间断言 + 数量闭合 + 断链 + 合并 + 向量校验 + **`alignSequence`** |
 
-小计 **1,490 行**（C0.2 估 1,420；增量来自 `InsertResult`/`DeleteResult` 等结果类型 ~40 行与 `FtsModeCache` ~30 行）。
+小计 **1,630 行**（v3 是 1,490；v4 的 +140 全部来自 P0-1/P0-2/P0-3 的实现：`FtsProbe` 的清理与残留检查 +90、`FtsTriggers` 校验 +30、唯一索引预检 +20）。
 
-> 比 C0.2 的 1,450 行预算多 40 行，仍在 §8.5 的容忍范围内（见该节的核算）。
+> 比 C0.2 的 1,450 行预算多 180 行。这是**缺陷修复的必然成本**，不是顺手重构；§8.5 的上限同步从 1,500 调到 **1,650**，并保留 20 行余量。
 
 ### 8.2 修改生产文件（**恰好 4 个**，D-6/D-7 后由 2 个增至 4 个）
 
 | # | 路径 | 改动 | 行数（估） |
 |---|---|---|---|
-| 1 | `app/src/main/java/com/zhuli/core/InboxDatabase.kt` | ① `DB_VERSION = 17`；② `createCoreTables` 拆成 `createCoreTablesV15` + `createFactTableV15`（**X-1 / D-7**，§4.8.3）；③ `onCreate` 内调用点 `:317` 换成 `createCoreTablesV15` + `MemorySchema.attach(prefs)` + `MemorySchema.createAll(db, withUnique=true)`；④ `onOpen` 内调用点 `:339` 换成 `createCoreTablesV15` + `MemorySchema.ensureAll(db)`；⑤ `onUpgrade` 内调用点 `:787`（`oldVersion<15` 分支）换成 `createCoreTablesV15` + `createFactTableV15`；⑥ `upgradeSteps` 末尾加 `if (oldVersion < 17) { MemorySchema.createAll(db, withUnique=false); MemoryMigrator.migrate(db, now) }` | **+34 / −10** |
+| 1 | `app/src/main/java/com/zhuli/core/InboxDatabase.kt` | ① `DB_VERSION = 17`；② `createCoreTables` 拆成 `createCoreTablesV15` + `createFactTableV15`（**X-1 / D-7**，§4.8.3）；③ `onCreate` 内调用点 `:317` 换成 `createCoreTablesV15` + `MemorySchema.attach(prefs)` + `MemorySchema.createAll(db, withUnique=true)`；④ `onOpen` 内调用点 `:339` 换成 `createCoreTablesV15` + `MemorySchema.ensureAll(db)`；⑤ `onUpgrade` 内调用点 `:787`（`oldVersion<15` 分支）换成 `createCoreTablesV15` + `createFactTableV15`；⑥ `upgradeSteps` 末尾加 `if (oldVersion < 17) { MemorySchema.createAll(db, withUnique=false); MemoryMigrator.migrate(db, now) }`；⑦ `onUpgrade` 第一行改调 `MigrationBackup.checkAndBackup(db, oldVersion, dir)`（**模式闸门在拷贝之前**，P0-3） | **+38 / −12** |
 | 2 | `app/src/main/java/com/zhuli/memory/MemoryRepo.kt` | 全量重写为投影层（27 个签名不变）；删掉 `insert`/`reinforce`/`supersede`/`upsertEntity` 等 5 个写旧表的私有方法（§4.8.4）；新增 `projectStatus()` 显式七分支（§7.12.4） | 485 → **~175**（净减 ~310） |
 | 3 | `app/src/main/java/com/zhuli/memory/MemoryTypes.kt` | **D-6**：`FactStatus` 加 `EXPIRED` / `REJECTED` / `UNKNOWN`；`of(raw: String?)` 改为 `?: UNKNOWN`；新增 `isCurrent` / `isActionable`；KDoc 写清四组语义区别（§7.12.2） | 154 → **~172**（+18 / −6） |
 | 4 | `app/src/main/java/com/zhuli/memory/MemoryRanker.kt` | **D-6 第 7 条**：`conflicts` 的过滤集合改为 `isActionable`；配对规则改为"ACTIVE × 每个候选"优先；KDoc 说明 MULTI 排除在 Store 层（§7.12.5） | 124 → **~132**（+8 / −3） |
 
-改动总量：**+60 / −329**（净减 269 行，主要是 `MemoryRepo` 从 485 行缩到 175 行）。
+改动总量：**+64 / −331**（净减 267 行，主要是 `MemoryRepo` 从 485 行缩到 175 行）。
 
 > 为什么 `MemoryRanker.kt` 必须改而不能绕：D-6 第 7 条的原话是"`MemoryRanker.conflicts` 必须支持新记忆冲突模型，不能因为冲突败方处于 `CANDIDATE` 而静默丢失冲突展示"。绕到 `MemoryRepo` 里另写一套配对，等于让 `MemoryRanker.conflicts` 继续对 `CANDIDATE` 视而不见——任何其他调用方（或未来的 C2 编排）用它都会踩同一个坑。
 
@@ -2490,13 +3028,13 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 | # | 路径 | 类型 | 行数（估） | 覆盖（逻辑条数） |
 |---|---|---|---|---|
 | 1 | `app/src/test/java/com/zhuli/memory/MemoryTextTest.kt` | 新增 | 140 | L1 纯函数：`norm` / `searchText` / `queryExpr` / `dedupeKey` / `slotHash`（含 CJK、全角、标点、单字） |
-| 2 | `app/src/test/java/com/zhuli/memory/MemorySchemaTest.kt` | 新增 | 200 | DDL 一致性（40 列 + **15 显式 + 4 自动**索引，§4.5）、建表幂等、`detectFtsMode` 三档 + 缓存六道门（§6.4）、`T-M40` |
-| 3 | `app/src/test/java/com/zhuli/memory/MemoryMigratorTest.kt` | 新增 | 580 | `T-M01`–`T-M10`、`T-M36`–`T-M38`（**13**）+ `T-M41`–`T-M45`（**5**）+ `T-M46`（**1**）= **19** |
-| 4 | `app/src/test/java/com/zhuli/memory/MemoryStoreTest.kt` | 新增 | 790 | `T-S11`–`T-S20`（10）+ `T-S39`（1）+ `T-S21`–`T-S24`（4）+ `T-D31` / `T-D33` / `T-D44`–`T-D49`（8）+ `T-N01`–`T-N05`（5）= **28** |
+| 2 | `app/src/test/java/com/zhuli/memory/MemorySchemaTest.kt` | 新增 | **300** | DDL 一致性（40 列 + **15 显式 + 4 自动**索引，§4.5）、建表幂等、`detectFtsMode` 三档 + 缓存六道门（§6.4）、`T-M40`、**`T-S25`–`T-S31`（清理失败注入、残留、触发器定义校验、WAL 降级）** |
+| 3 | `app/src/test/java/com/zhuli/memory/MemoryMigratorTest.kt` | 新增 | **780** | `T-M01`–`T-M10`、`T-M36`–`T-M38`（13）+ `T-M41`–`T-M45`（5）+ `T-M46`（1）+ **`T-M47`–`T-M52`（6）** = **25** |
+| 4 | `app/src/test/java/com/zhuli/memory/MemoryStoreTest.kt` | 新增 | **920** | `T-S11`–`T-S20`（10）+ `T-S39`（1）+ `T-S21`–`T-S24`（4）+ `T-D31` / `T-D33` / `T-D44`–`T-D49`（8）+ **`T-D50`（1，三档执行）** + `T-N01`–`T-N06`（6）= **30** |
 | 5 | `app/src/test/java/com/zhuli/memory/MemoryTimeQueryTest.kt` | 新增 | 230 | `T-T21`–`T-T24`、`T-T40`–`T-T43`（8） |
 | 6 | `app/src/test/java/com/zhuli/memory/MemoryScopeTest.kt` | 新增 | 200 | `T-C25`–`T-C30`、`T-C57`（7） |
 | 7 | `app/src/test/java/com/zhuli/memory/MemoryFactStatusTest.kt` | **新增（D-6）** | 300 | `T-X01`–`T-X12`（12）；含 `MemoryFactStatusTriggerTest` / `…AppSyncTest` 两个子类（§10.9.3） |
-| 8 | `app/src/test/java/com/zhuli/memory/MemoryTestFixture.kt` | 新增（**非测试类**） | 160 | `insertRaw` / `seedLegacy` / `seedItem`（C0.2 §14.3）+ `runConcurrently`（`T-N01`–`T-N05` 的 `CountDownLatch` 夹具） |
+| 8 | `app/src/test/java/com/zhuli/memory/MemoryTestFixture.kt` | 新增（**非测试类**） | **180** | `insertRaw` / `seedLegacy` / `seedItem`（C0.2 §14.3）+ `runConcurrently`（`T-N01`–`T-N06` 的 `CountDownLatch` 夹具）+ `openWalDatabase`（`T-M50`/`T-S31` 用） |
 | 9 | `app/src/androidTest/java/com/zhuli/memory/MemoryMigrationTimingTest.kt` | 新增 | 160 | D2 设备耗时（1k/5k/20k）+ 迁移后不变量 + `thread=` 字段 |
 | 10 | `app/src/test/java/com/zhuli/memory/MemorySqliteTest.kt` | **修改** | +20 / −5 | `v15 库升级` 用例断言 v17；新增 `zhuli_fact` 不存在的断言；`activeCount` 仍为 1 |
 
@@ -2504,30 +3042,30 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 
 | 口径 | 行数 |
 |---|---|
-| 新增测试代码（不含 fixture） | 140 + 200 + 580 + 790 + 230 + 200 + 300 + 160 = **2,600** |
-| 含 fixture | **2,760** |
+| 新增测试代码（不含 fixture） | 140 + 300 + 780 + 920 + 230 + 200 + 300 = **2,870** |
+| 含 fixture | **3,050** |
 | 修改 | 1 个文件（`MemorySqliteTest.kt`，+20/−5） |
-| 逻辑用例合计 | 5 + 1 + 19 + 28 + 8 + 7 + 12 = **75**（+5 组纯函数不计编号） |
+| 逻辑用例合计 | 1（`T-M40`）+ 25 + 30 + 8 + 7 + 12 + 7（`T-S25`–`T-S31`）= **90**（5 组纯函数不计编号） |
 
-> **v3 的 +420 行从哪来**（相对 v2 的 2,340）：`MemoryMigratorTest` +40（`T-M46`）、`MemoryStoreTest` +310（`T-S21`–`T-S24` 约 110 + `T-N01`–`T-N05` 约 200）、`MemoryFactStatusTest` +20（双类结构）、`MemorySchemaTest` +20（19 个索引的断言）、`MemoryTestFixture` +30（并发夹具）。
+> **v4 的 +290 行从哪来**（相对 v3 的 2,760）：`MemoryMigratorTest` +200（`T-M47`–`T-M52`，含 6 条迁移用例与两个故障库构造）、`MemoryStoreTest` +130（`T-D50` 三档 + `T-N06` 八线程）、`MemorySchemaTest` +100（4 条清理注入 + 2 条触发器定义 + 1 条 WAL 降级）、`MemoryTestFixture` +20（`openWalDatabase`）。
 >
-> **测试预算上限从 2,400 调到 2,800**：不是"范围扩张"，是 §10.12 那 10 条用例的必然成本。C1-B5 用 `git diff --stat` 核对，超 2,800 必须逐条解释，不能只说"写多了"。
+> **测试预算上限从 2,800 调到 3,300**：15 条新用例里有 8 条是"故障注入 / 并发 / 双路径对照"，单条成本高于普通断言。C1-B5 用 `git diff --stat` 核对，超 3,300 必须逐条解释，不能只说"写多了"。
 
 
 ### 8.5 diff 预算核算与自检
 
 | 项 | 上限 | 本方案估算 | 是否超 |
 |---|---|---|---|
-| 生产新增 | ≤1,500（v2 调整，v1 为 1,450） | 1,490 | 否（余 10） |
-| 生产修改 | **恰好 4 个文件** | 4 个（`InboxDatabase` +34/−10、`MemoryRepo` 485→175、`MemoryTypes` +18/−6、`MemoryRanker` +8/−3） | 否 |
-| 测试新增 | ≤2,800（v3 调整，v2 为 2,400） | ~2,760（含 fixture） | 否（余 40） |
+| 生产新增 | ≤1,650（v4 调整；v3 为 1,500、v2 为 1,450） | 1,630 | 否（余 20） |
+| 生产修改 | **恰好 4 个文件** | 4 个（`InboxDatabase` +38/−12、`MemoryRepo` 485→175、`MemoryTypes` +18/−6、`MemoryRanker` +8/−3） | 否 |
+| 测试新增 | ≤3,300（v4 调整；v3 为 2,800、v2 为 2,400） | ~3,050（含 fixture） | 否（余 250） |
 | 测试修改 | — | 1 个文件（`MemorySqliteTest.kt`，+20/−5） | — |
 | 触碰 C0.2 §10.3 禁止清单 | 0，除 D-6 明确放行的 `MemoryTypes.kt` / `MemoryRanker.kt` | 0 | 否 |
 | 数据库版本 | 只 +1 | 16→17 | 否 |
 
 > **`MemoryTypes.kt` 的"禁止清单"冲突怎么处理**：C0.2 §10.3 写的是"`MemoryTypes.kt` 不动"，D-6 正式决定扩展 `FactStatus`。D-6 是**后出的、更具体的决策**，按"后出优先 + 具体优先"覆盖该条；C0.2 文档本身不改（它是冻结的架构依据），差异记在修订对照表 v3 的 §3。`MemoryRanker.kt` 同理（D-6 第 7 条）。
 
-#### 8.5.1 两个白名单必须分开（P1-7）
+#### 8.5.1 两个白名单必须分开（v3 P1-7）
 
 v2 在 §9.1 与 §15 都写"`git diff` 只含 7 个文件（4 新增 + 3 修改）"，但 B1 阶段实际会动**测试文件**（`MemoryTextTest` / `MemorySchemaTest` / `MemoryFactStatusTest` 的解析部分 / `MemorySqliteTest` 的断言）。把生产与测试混在一个数字里，验收时无法判断"多出来的是测试还是生产"。
 
@@ -2548,24 +3086,26 @@ v2 在 §9.1 与 §15 都写"`git diff` 只含 7 个文件（4 新增 + 3 修改
 
 > **v3 在这里修了一个加减错误**（P1-7 的连带问题）：v2 写"19 个 = 7 + 4 + 8 + 1"，但 7+4+8+1=20，等式本身不成立；且 B4 的追加清单漏了 `MemoryStoreTest.kt` 与 `MemoryRepo.kt`，B1 的"生产修改 3 个"里也没有 `MemoryRepo`（它在 B4 才动）。逐阶段累加与分类汇总两条路都必须得到 **21**，自检命令 #3 的期望值同步改成 10。这类"总数与明细对不上"正是 P1-7 要求分开白名单的原因——只给一个总数，错了也看不出来。
 
-> 注意 `MemoryStoreTest.kt` 在 B4 追加，它的 28 条用例里有 4 条 `T-S21`–`T-S24` 需要先有 `syncFts`（B3）与 `MemoryStore`（B4）——顺序不能倒。
+> 注意 `MemoryStoreTest.kt` 在 B4 追加，它的 30 条用例里有 4 条 `T-S21`–`T-S24` 需要先有 `syncFts`（B3）与 `MemoryStore`（B4）——顺序不能倒。
+>
+> **v4 新增的 15 条用例不增加任何文件**：`T-M47`–`T-M52` 进 `MemoryMigratorTest`（B2 已建）、`T-S25`–`T-S31` 进 `MemorySchemaTest`（B1 已建）、`T-D50` / `T-N06` 进 `MemoryStoreTest`（B4 已建）。所以白名单仍是 **21 个**，`§8.5.2` 的期望值不变——这是"新用例不该顺手开新文件"的硬约束。
 
 #### 8.5.2 自检命令（v3 修正期望值）
 
-**共 17 条命令**：第 `0)` 条是 `git add -N` 的准备步骤（不做它，后面所有 `git diff` 都看不到 1,490 行新增，`--name-only` 也只数到 11 之外的 0 个），其余 16 条是自检。每条都写了期望值，**任何一条不符都停下来解释，不许"看起来没问题"就过**。
+**共 19 条命令**：第 `0)` 条是 `git add -N` 的准备步骤（不做它，后面所有 `git diff` 都看不到 1,630 行新增，`--name-only` 也只数到 11 之外的 0 个），其余 18 条是自检。每条都写了期望值，**任何一条不符都停下来解释，不许"看起来没问题"就过**。
 
 ```bash
-# 0) 必须先把新增文件放进 diff 视野，否则下面所有计数都会少 1,490 行
+# 0) 必须先把新增文件放进 diff 视野，否则下面所有计数都会少 1,630 行
 git add -N app/src
 
 # 1) 生产文件的全部改动（7 新增 + 4 修改 = 11）
 git diff --name-only HEAD -- app/src/main | wc -l          # 期望 11
 git diff --name-only HEAD -- app/src/main                   # 逐行核对是否都在白名单
 
-# 2) 生产改动量（含新增的 1,490 行）
+# 2) 生产改动量（含新增的 1,630 行）
 git diff --stat HEAD -- app/src/main
-# 期望：11 files changed, 约 +1,550 / −329
-# （+60 是 4 个修改文件的增量，+1,490 是 7 个新增文件）
+# 期望：11 files changed, 约 +1,694 / −331
+# （+64 是 4 个修改文件的增量，+1,630 是 7 个新增文件）
 
 # 3) 测试文件（9 新增 + 1 修改 = 10）
 git diff --name-only HEAD | grep -c 'src/test\|src/androidTest'   # 期望 10
@@ -2587,6 +3127,10 @@ grep -rn "createCoreTablesV15\|createFactTableV15" app/src/main | wc -l  # 期�
 grep -rn "?: ACTIVE" app/src/main/java/com/zhuli/memory     # 期望 0（D-6 第 3 条）
 grep -rn "FactStatus.valueOf" app/src/main                  # 期望 0
 grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查询一律走 CURRENT）
+
+# 7) v4 新增的两条硬断言
+grep -rn "INSERT OR REPLACE INTO sqlite_sequence" app/src/main  # 期望 0（P1-1：必须 UPDATE→changes→INSERT）
+grep -rn "dropInterceptor" app/src/main | wc -l                 # 期望 2（1 声明 + 1 使用；其余在测试文件）
 ```
 
 **v2 的三个期望值是错的，v3 逐个修正**：
@@ -2594,7 +3138,7 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 | 命令 | v2 期望 | v3 期望 | 为什么错 |
 |---|---|---|---|
 | `git diff --name-only -- app/src/main \| wc -l` | 4 | **11** | `git add -N` 后新增文件也进 diff；4 只是"修改"的数量 |
-| `git diff --stat -- app/src/main` | ~+60/−329 | **~+1,550/−329** | 同上，漏了 7 个新增文件的 1,490 行 |
+| `git diff --stat -- app/src/main` | ~+60/−329 | **~+1,694/−331** | 同上，漏了 7 个新增文件的 1,630 行 |
 | `git status --porcelain \| grep '^??'` | 7 个 `??` | **7 个 `AM`** | `git add -N` 之后状态是 `AM`（已 intent-to-add），不再是 `??` |
 
 
@@ -2602,8 +3146,10 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 
 | 路径 | 动作 |
 |---|---|
-| `docs/批次C1-B_记忆系统基础设施实施方案.md` | **本文**（C1-B 开工前交付；v2 落实 D-6/D-7） |
-| `docs/批次C1-B_方案决策修订记录.md` | **v2 新增**（D-6/D-7 决策原文、落实映射、差异清单、测试重算） |
+| `docs/批次C1-B_记忆系统基础设施实施方案.md` | **本文**（C1-B 开工前交付；v4） |
+| `docs/批次C1-B_方案决策修订记录.md` | v2 新增（D-6/D-7 决策原文、落实映射、差异清单、测试重算） |
+| `docs/批次C1-B_方案v2到v3修订对照表.md` | v3 新增（历史，v4 不改） |
+| `docs/批次C1-B_方案v3到v4修订记录.md` | **v4 新增**（P0/P1 逐项关闭、A-1–A-7 状态、测试重算；与本文 §20 同源） |
 | `docs/批次C1-B_实施与验收报告.md` | C1-B5 产出（不在本轮） |
 
 `docs/批次C0.2_*.md` / `docs/批次C1-A_*.md` **不改**（C0.2 是冻结的架构依据；C1-A 是已完成的事实记录）。D-6 覆盖 C0.2 §10.3 的"`MemoryTypes.kt` 不动"这一条，差异记在修订记录，不回写 C0.2。
@@ -2638,23 +3184,25 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 
 | 步 | 动作 | 产物 |
 |---|---|---|
-| 1 | `MemoryMigrator.kt` 骨架：**第 0 步断言（`oldVersion` 分支 + `journal_mode` 拒绝 WAL）** + 13 步空实现 + `MigrationReport` | 可编译，跑通空迁移 |
+| 1 | `MemoryMigrator.kt` 骨架：**第 0 步断言（`oldVersion` 分支 + `journal_mode` 第二道闸门）** + `MigrationBackup`（**备份前**的模式闸门，P0-3）+ 13 步空实现 + `MigrationReport` | 可编译，跑通空迁移；`T-M50` / `T-M51` 先绿 |
 | 2 | 逐行映射（§5.3 的 40 列）+ **逐行账本（§5.9 的 `RowOutcome`）** | 真实副本 2 行迁完；6 类终态计数正确 |
 | 3 | 来源与证据（§5.5，含 SECRET 先判后写） | `evidence` 行数 = `inserted`；SECRET 行零写入 |
 | 4 | 替代链 + 断链（§5.7） | edge 库的断链行被修 |
 | 5 | 合并（§5.6） | 5k 库的重复组被合并 |
 | 6 | 向量校验（§5.8） | 真实库 1 条保留 |
-| 7 | FTS 灌数据 + 触发器 + 唯一索引 + 改名 | `T-M09` 通过 |
-| 8 | 账本闭合 + 5 条时间断言 + 第 6 条状态断言 | 4 档库全 0（第 3 条允许告警） |
-| 9 | `sqlite_sequence` 对齐（`INSERT OR REPLACE`）+ `T-M46` | 新插入 id 不冲突 |
-| 10 | `InboxDatabase.upgradeSteps` 接入（含备份位置不变、`onUpgrade` 内不做 checkpoint） | v16→v17 自动发生 |
+| 7 | FTS 灌数据 + 触发器 | `T-M09` 通过 |
+| 8 | **三个唯一索引**：预检（§5.2.1 的 P1/P2/P3）→ 按序建 → `pragma_index_list` + SQL 校验 | `T-M47` / `T-M48` 绿；升级库与新建库结构一致 |
+| 9 | 账本闭合 + 5 条时间断言 + 第 6 条状态断言 | 4 档库全 0（第 3 条允许告警） |
+| 10 | `sqlite_sequence`：收敛重复行 → `UPDATE` → `changes()==0` 再 `INSERT` → 断言恰好 1 行 + `T-M46` / `T-M52` | 新插入 id 不冲突；同名行恒为 1 |
+| 11 | `InboxDatabase.upgradeSteps` 接入（备份前置闸门、`onUpgrade` 内不做 checkpoint、不设 `user_version`） | v16→v17 自动发生 |
 
 **完成条件**：
 - 4 档库（2 / 11 / 5,002 / 20,002 行）全部 `inserted + quarantined + skippedNoSubject + skippedNoValue + failed = src`，且 `failed=0`、`merged ≤ inserted`；
 - C0.2 §6.6 的 10 组（11 条 SQL）在 4 档库上全 0；
 - 5 条时间断言：1/2/4/5 为 0，第 3 条 ≤ 已知值且记入 `vf_mismatch`；第 6/6b 条（状态不变量，含 `NULL`）为 0；
-- `PRAGMA integrity_check` = `ok`；`sqlite_sequence.seq >= MAX(item.id)` 且新插入 id 不冲突（`T-M46`）；
-- 故障注入 5 种全部回滚到 v16（§11.3）；
+- `PRAGMA integrity_check` = `ok`；`sqlite_sequence` 里 `zhuli_memory_item` **恰好 1 行**且 `seq >= MAX(item.id)`，新插入 id 不冲突（`T-M46` / `T-M52`）；
+- **三个唯一索引全部存在且定义正确**，升级库与新建库的 `(name, unique, columns, where)` 集合相等（`T-M47` / `T-M49`）；
+- 故障注入 5 种全部回滚到 v16（§11.3），另加"唯一冲突"（`T-M48`）与"WAL"（`T-M50`）两种；
 - `oldVersion=14` / `15` / `16` 三条升级路径各跑一次，全部成功（P0-7：v14/v15 不得因版本断言失败）；
 - 设备耗时 5k ≤ 3s（§5.13），超门槛按 §5.13.1 处置（**不得**改成分批提交）。
 
@@ -2662,11 +3210,12 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 
 | 步 | 动作 | 产物 |
 |---|---|---|
-| 1 | `FtsModeCache`（`SharedPreferences` 三键） | 读写可测 |
-| 2 | `detectFtsMode` 七步（§6.2） | 三档可复现 |
-| 3 | `createFtsTable` / `createFtsTriggers` / `syncFts` / `rebuildFts` | 幂等可测 |
+| 1 | `FtsModeCache`（`SharedPreferences` 四键 + 六道门） | 读写可测 |
+| 2 | `FtsProbe`（§6.2）：前置断言 → 建 → 功能验证 → **清理 → 残留检查 → 才决定** | `T-S25`–`T-S28` 绿（四种清理结局） |
+| 3 | `createFtsTable` / `createFtsTriggers` / `FtsTriggers.verify/repair` / `syncFts` / `rebuildFts` | `T-S29` / `T-S30` 绿（定义坏 → 修复） |
 | 4 | `MemorySchema.attach(prefs)` 接入 `InboxDatabase` | 探测只跑一次 |
 | 5 | 负向验证：在 `androidTest` 里人为把 `trusted_schema` 关掉（C1-A 的 step8 复用） | 探测返回 `APP_SYNC` 而不是 `TRIGGER` |
+| 6 | **WAL 降级**（`T-S31`）：`enableWriteAheadLogging()` 后探测 | 返回 `APP_SYNC("wal")`，不写缓存；关掉 WAL 后能回到 `TRIGGER` |
 
 **完成条件**：
 - 同一台设备连续打开 5 次，探测只执行 1 次（日志计数）；
@@ -2674,7 +3223,9 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 - 人为制造坏环境（`PRAGMA trusted_schema=OFF`）时，探测返回 `APP_SYNC`（**这是最关键的一条**，它就是 C1-A 教训的落地）；
 - `ftsMode=NONE` 时检索走 `LIKE` 且 **`sensitive` / `scope` / `status` / 生效区间四个约束**仍在（v2 写"三个"，漏了生效区间）；
 - `LIKE` 的用户输入已转义：搜 `100%` 与 `a_b` 不产生通配符误命中（§6.3.1）；
-- `selfCheck` 的第 1、2 条在"人为删掉一条 FTS 行"后能报出来。
+- `selfCheck` 的第 1、2 条在"人为删掉一条 FTS 行"后能报出来；
+- **清理失败一定降级**：`DROP TRIGGER` 失败、`DROP TABLE` 失败、静默跳过、正常清理四种结局分别由 `T-S26`/`T-S27`/`T-S28`/`T-S25` 覆盖；前三种返回 `APP_SYNC` 且**缓存里没有 `TRIGGER`**；
+- **触发器定义校验生效**：数量=3 但 `_au` 少 `OF`、`_ai` 挂错表，两种情况都必须让缓存失效并修复（`T-S29`/`T-S30`）。
 
 ### 9.4 C1-B4｜Store / Manager
 
@@ -2689,8 +3240,8 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 | 7 | `MemoryTestFixture` + scope 用例 | `T-C25`–`T-C30` / `T-C57` |
 | 8 | `selfCheck` 10 组 | 空库返回空列表 |
 | 9 | **D-6 六态投影与冲突用例** | `T-X05`–`T-X08`、`T-X12` |
-| 10 | **FTS 写入职责（§6.3 的 W-1/W-2/W-3）** | `T-S21`–`T-S24` |
-| 11 | **并发 5 条（§7.5.3）** | `T-N01`–`T-N05` |
+| 10 | **FTS 写入职责（§6.3 的 W-1/W-2/W-3）** | `T-S21`–`T-S24` + `T-D50`（softDelete 三档） |
+| 11 | **并发 6 条（§7.5.3）** | `T-N01`–`T-N06` |
 
 **完成条件**：
 - `MemoryRepo` 的 27 个签名逐条对照无变化（§8.5 的 review checklist）；
@@ -2699,16 +3250,16 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 - `selfCheck()` 在干净库返回 `emptyList()`，在人为破坏的 4 种场景各返回 1 条；
 - **六态投影一一对应、无合并**（`T-X06`）；`active()`/`unconfirmed()`/`history()`/`search()`/`conflicts()` 的可见性矩阵与 §7.12.4 逐格一致（`T-X07`）；
 - **`conflicts()` 在"1 ACTIVE + 1 CANDIDATE"下返回 1 对**（旧实现返回 0 对，`T-X09`）；
-- **FTS 三档写入职责全绿**（`T-S21`–`T-S24`）：`TRIGGER` 不双写、`APP_SYNC` 7 条路径不漏写、`NONE` 仍写 `search_text` 且四约束不丢；
-- **并发 5 条全绿**（`T-N01`–`T-N05`，每条跑 50 次，0 次出现两条 ACTIVE / 未捕获 `SQLiteConstraintException`）；
-- **B4 结束时的执行计数**：逻辑 75 条 / 执行 126 次（§10.11.2）。
+- **FTS 三档写入职责全绿**（`T-S21`–`T-S24` + `T-D50`）：`TRIGGER` 不双写、`APP_SYNC` **6 条**路径不漏写、`NONE` 仍写 `search_text` 且四约束不丢、`softDelete` 在三档下都不直接碰 FTS；
+- **并发 6 条全绿**（`T-N01`–`T-N06`，每条跑 50 次；`T-N06` 额外断言 8 线程读到的 `trusted_schema`/`journal_mode` 一致）；
+- **B4 结束时的执行计数**：逻辑 90 条 / 执行 140 次（§10.11.2）。
 
 
 ### 9.5 C1-B5｜回归与验收
 
 | 步 | 动作 | 产物 |
 |---|---|---|
-| 1 | 全量 `:app:testDevDebugUnitTest` | **XML `tests` ≥ 457**（逻辑 75 条 / 执行 126 次，§10.11） |
+| 1 | 全量 `:app:testDevDebugUnitTest` | **XML `tests` ≥ 471**（逻辑 90 条 / 执行 140 次，§10.11） |
 | 2 | `:app:connectedDevDebugAndroidTest` | D1–D4、D6、D7、D9、D10 |
 | 3 | B1 的 12 个验收场景 | D8 |
 | 4 | 飞行模式手测 | D5 |
@@ -2739,16 +3290,16 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 |---|---|---|---|---|
 | L0 能力门槛 | Robolectric + androidTest | `MemoryFtsRobolectricTest` / `MemoryFtsInstrumentedTest`（C1-A 已交付） | 7（已完成） | 18（已完成） |
 | L1 纯函数 | JVM 单测 | `MemoryTextTest` + `MemoryFactStatusTest` 的解析部分 | 5 组 + 4 条（`T-X01`–`T-X03`、`T-X10`） | 同左（不双跑） |
-| L2 真实 SQLite | Robolectric `NATIVE` | `MemoryMigratorTest` / `MemoryStoreTest` / `MemoryTimeQueryTest` / `MemoryScopeTest` / `MemorySchemaTest` / `MemoryFactStatusTest` | **75** | **126** |
+| L2 真实 SQLite | Robolectric `NATIVE` | `MemoryMigratorTest` / `MemoryStoreTest` / `MemoryTimeQueryTest` / `MemoryScopeTest` / `MemorySchemaTest` / `MemoryFactStatusTest` | **90** | **140** |
 | L3 设备 | 模拟器 | `MemoryMigrationTimingTest` + 手工 | D1–D10 | — |
 | L4 回归 | 现有套件 | `MemorySqliteTest` + B1 的 12 场景 | 331（XML 基线） | 331 |
 
-> 75 = 架构用例 47（A/B/C/D/E 组）+ D-6 的 12（`T-X01`–`T-X12`）+ D-7 的 6（`T-M40`–`T-M45`）+ v3 的 10（`T-M46` / `T-S21`–`T-S24` / `T-N01`–`T-N05`）。126 的逐组明细见 §10.11.2。
+> 90 = 架构用例 47（A/B/C/D/E 组）+ D-6 的 12（`T-X01`–`T-X12`）+ D-7 的 6（`T-M40`–`T-M45`）+ 实现级 25（v3 的 10 + v4 的 15）。140 的逐组明细见 §10.11.2。
 >
 > `T-X01`/`T-X02` 是纯函数，但为了"一个决策一个文件"的追溯性，放在 `MemoryFactStatusTest` 里统一维护，不拆到 `MemoryTextTest`。
 
 
-### 10.2 A 组｜迁移（13 条，`MemoryMigratorTest`）
+### 10.2 A 组｜迁移（**20 条**，`MemoryMigratorTest`）
 
 | # | 用例 | 断言（逐字照 C0.2 §11.2） | 造数据方式 |
 |---|---|---|---|
@@ -2775,6 +3326,20 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 | T-M43 | `onOpen` 幂等 | 连开 3 次：`sqlite_master` 的对象名集合与数量不变；`COUNT(*)` 三张主表不变 | 同 `T-M41`，比较三次快照 |
 | T-M44 | 重开后新记忆数据完整 | 逐列抽检 12 列 + 向量行数 + evidence 行数；与重开前一致 | `seedLegacy` 覆盖 ACTIVE/DELETED/SUPERSEDED/UNCONFIRMED 各一 |
 | T-M45 | v16 库缺 `zhuli_fact` 时升级失败且不建空表 | 抛异常 → 回滚 → `user_version=16`；`zhuli_fact` 仍不存在（**没有**被补建） | 手工造只含 `inbox` 的 v16 库 |
+
+**迁移专项（7 条，v3 + v4）：**
+
+| # | 用例 | 断言 | 造数据方式 |
+|---|---|---|---|
+| T-M46 | 迁移后自动 ID 不冲突 | 新 id == `MAX(迁移 id)+1`；`sqlite_sequence` 同名行**恰好 1 行**且 `seq >= MAX(id)`；再插一行继续 +1 | `seedLegacy(11)`，id 含 1001–1011 |
+| **T-M47** | **三个唯一索引都建了** | `pragma_index_list` 中 `idx_mi_dedupe` / `idx_ms_dedupe` / `idx_mev_primary` 全部存在且 `unique=1`；`sqlite_master.sql` 与 `EXPECTED_INDEXES` 归一化后全等；分别插重复值都抛 `SQLiteConstraintException` | 升级 v16 库后查结构 + 试插 |
+| **T-M48** | **唯一冲突 → 失败并回滚** | 造 `zhuli_memory_source` 同 5 元组两行 → 抛 `MigrationConflictException`（含表名与组数）→ `user_version=16`、`zhuli_fact` 仍在、`zhuli_memory_item` 不存在 | 迁移前直接 `INSERT` 造重复 |
+| **T-M49** | **新建库 vs 升级库结构一致** | 两条路径的 `(name, unique, columns, where)` 四元组集合相等；15 显式 + 4 自动 | `deleteDatabase` 后新装 + `seedLegacy(11)` 后升级 |
+| **T-M50** | **WAL 下拒绝且不备份** | `MigrationBackup.checkAndBackup` 抛 `UnsupportedJournalModeException`；备份目录无新文件；`user_version=16`；行数与内容不变 | `openDatabase(..., ENABLE_WRITE_AHEAD_LOGGING)` 打开 v16 库 |
+| **T-M51** | **允许模式备份成功** | `journal_mode=delete` → 备份文件存在；`PRAGMA integrity_check=ok`；行数一致 | `seedLegacy(11)` |
+| **T-M52** | **sequence 对齐幂等** | 人为先插 3 行同名 `sqlite_sequence` → 对齐后 1 行；重复调用不变；`seq >= MAX(id)` | 直接写 `sqlite_sequence` |
+
+> `T-M46`–`T-M52` 都归 `MemoryMigratorTest`，不新增文件。A 组因此是 **13（C0.2 编号）+ 7（专项）= 20 条**，全部单跑（不依赖 `ftsMode`）。
 
 > `T-M40`（新装库结构）不在本表：它测 `onCreate`，归 `MemorySchemaTest`（§4.8.6 已说明）。
 
@@ -2822,9 +3387,9 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 
 **14.3 的约束必须遵守**：`T-C25`–`T-C29` 的数据**只经** `MemoryTestFixture.insertRaw` 构造；`T-C30`/`T-C57` 测的正是"生产 API 拒绝"，两者不矛盾——前者绕过写入层直接造行测检索层，后者验证写入层不放行。
 
-### 10.6 E 组｜删除与恢复（9 条，C1 实现 8 条——`T-D32` 明列但归 C3，`MemoryStoreTest`）
+### 10.6 E 组｜删除与恢复（10 条，C1 实现 9 条——`T-D32` 明列但归 C3，`MemoryStoreTest`）
 
-> 本节列 9 条是为了让 C0.2 的编号链完整；**C1-B 实际编写 8 条**（`T-D31`/`T-D33`/`T-D44`–`T-D49`）。`T-D32` 只留设计（§17），不计入 §10.11 的 47 条架构用例，也不占测试预算。
+> 本节列 10 条是为了让 C0.2 的编号链完整；**C1-B 实际编写 9 条**（`T-D31`/`T-D33`/`T-D44`–`T-D49`/`T-D50`）。`T-D32` 只留设计（§17），不计入 §10.11 的 47 条架构用例，也不占测试预算。
 
 | # | 用例 | 断言 |
 |---|---|---|
@@ -2837,6 +3402,7 @@ grep -rn 'status=="ACTIVE"\|status == "ACTIVE"' app/src/main  # 期望 0（查�
 | T-D47 | 恢复时槽位被占 | 同槽不同值 ACTIVE → `Demoted(CANDIDATE)` + `CONFLICTS_WITH`；MULTI → `Restored(ACTIVE)` |
 | T-D48 | 恢复时同值已占用 | `AlreadyPresent(id)`、不抛 UNIQUE、本行仍 DELETED、证据复制到占用行 |
 | T-D49 | 删除/恢复的 revision | 两条（`DELETE`→`RESTORE`），`before_json`/`after_json` 成对，`actor='USER'` |
+| **T-D50** | **三档下的 softDelete FTS 职责** | 参数化三档各跑一次：`TRIGGER` 档 `syncFts` 调用 0 次且 FTS 行数 -1；`APP_SYNC` 档调用 1 次且行数 -1；`NONE` 档不碰 FTS（表不存在也不抛）；三档都不出现"直接 `DELETE FROM zhuli_memory_fts`" |
 
 ### 10.7 F 组｜Agent（2 条，**C3**）
 
@@ -2915,80 +3481,81 @@ class MemoryFactStatusAppSyncTest : MemoryFactStatusTestBase() { override val ft
 | D9 | 时间语义端到端 | 不显示伪造的"何时开始"；CURRENT 不返回未来生效项 | 截图 + 库查询 |
 | D10 | 恢复端到端 | 删 SUPERSEDED → 恢复 → 没变成当前值 | 截图 |
 
-### 10.11 数量核算（P1-6，v3 重算）
+### 10.11 数量核算（v4 P1-7）
 
-#### 10.11.1 逻辑用例数
+v3 把 `T-S21`–`T-S24` 都当成双跑。实际上这 4 条各自固定一个 `ftsMode`（`TRIGGER` / `APP_SYNC` / `NONE` / 与 FTS 无关），天生只跑一次。把它们算成双跑，门禁数字就比真实执行多 4 次——**为了让总数好看而重复计算，是这一节要禁止的事**。
 
-| 组 | 全口径条数 | C1 实现 | 已在 C1-A | C1-B 新增 | v3 新增 |
-|---|---|---|---|---|---|
-| A 迁移 | 13 | 13 | 0 | **13** | 0 |
-| B 存储 | 11 | 11 | 0 | **11** | 0 |
-| C 时间 | 8 | 8 | 0 | **8** | 0 |
-| D Scope | 7 | 7 | 0 | **7** | 0 |
-| E 删除恢复 | 9 | 8（`T-D32` 归 C3） | 0 | **8** | 0 |
-| F Agent | 2 | 0（归 C3） | 0 | **0** | 0 |
-| G FTS | 7 | 7 | **7** | 0 | 0 |
-| **架构小计** | **57** | **54** | **7** | **47** | 0 |
-| H-1 D-6 状态兼容 | 12 | 12 | 0 | **12** | 0 |
-| H-2 D-7 建表回归 | 6 | 6 | 0 | **6** | 0 |
-| H-3 v3 补充 | 10 | 10 | 0 | **10** | **10** |
-| **决策小计** | **28** | **28** | **0** | **28** | **10** |
-| **合计** | **85** | **82** | **7** | **75** | **10** |
+#### 10.11.1 判据（逐条可查）
 
-H-3 的 10 条：
+| 参数化方式 | 适用 | 次数 |
+|---|---|---|
+| **单跑** | 不调用 `MemoryStore` 写方法（纯函数、迁移、DDL、探测/缓存）；**或**测试内部已固定 `ftsMode` | 1 |
+| **双跑** | 调用 `MemoryStore` 写方法，且**没有**固定 `ftsMode`（要靠两档对比证明行为一致） | 2 |
+| **三档** | 明确要证明"三档都对"的写路径（目前只有 `T-D50`） | 3 |
 
-| 编号 | 用例 | 归属文件 | 对应本轮的哪一项 |
+按文件汇总（Gradle 实际汇总的单位就是文件）：
+
+| 文件 | 逻辑 | 执行 | 构成 |
 |---|---|---|---|
-| `T-M46` | 迁移后自动 ID 不冲突 | `MemoryMigratorTest` | P1-8（`sqlite_sequence`） |
-| `T-S21` | `TRIGGER` 档不双写 | `MemoryStoreTest` | P0-5（W-1） |
-| `T-S22` | `APP_SYNC` 档 7 条路径都不漏写 | `MemoryStoreTest` | P0-5（W-2） |
-| `T-S23` | `NONE` 档 `search_text` 仍写、LIKE 命中且四约束不丢 | `MemoryStoreTest` | P0-5（W-3）+ §6.3.1 |
-| `T-S24` | 同一 source 重复 → `Duplicate` 零副作用 | `MemoryStoreTest` | P1-5 |
-| `T-N01` | 并发 `correct` | `MemoryStoreTest` | 验收细节 1 |
-| `T-N02` | 并发 `confirm` | `MemoryStoreTest` | 验收细节 1 |
-| `T-N03` | 并发 `resolveConflict` | `MemoryStoreTest` | 验收细节 1 |
-| `T-N04` | 并发 `softDelete` | `MemoryStoreTest` | 验收细节 1 |
-| `T-N05` | 并发 `restore` | `MemoryStoreTest` | 验收细节 1 |
+| `MemoryMigratorTest` | 25 | 25 | A 组 20（全单跑）+ D-7 的 5（`T-M41`–`T-M45`，单跑） |
+| `MemoryStoreTest` | 30 | **57** | B 11（双跑 22）+ `T-S21`–`T-S24` 4（单跑 4）+ E 9（8 双跑 16 + `T-D50` 3）+ N 6（双跑 12） |
+| `MemorySchemaTest` | 8 | 8 | `T-M40` 1 + `T-S25`–`T-S31` 7（单跑） |
+| `MemoryTimeQueryTest` | 8 | 16 | 8 双跑 |
+| `MemoryScopeTest` | 7 | 14 | 7 双跑 |
+| `MemoryFactStatusTest` | 12 | 20 | 4 条 L1 单跑 + 8 条 L2 双跑 |
+| **合计** | **90** | **140** | 单跑 41 条 / 41 次；双跑 48 条 / 96 次；三档 1 条 / 3 次 |
 
-#### 10.11.2 执行次数（XML 口径）
+#### 10.11.2 与 C0.2 的编号映射（防止"新增"被重复计入）
 
-**判据只有一条**：这条用例是否会调用 `MemoryStore` 的写方法（`insert` / `correct` / `confirm` / `resolveConflict` / `expire` / `softDelete` / `restore`）。会 → 双跑（因为 `APP_SYNC` 档在这 7 个方法里各多一次 `syncFts`）；不会 → 单跑。
+| 族 | 条数 | 明细 |
+|---|---|---|
+| C0.2 架构编号（C1 实现） | **47** | A 13 + B 11 + C 8 + D 7 + E 8 |
+| D-6 | **12** | `T-X01`–`T-X12` |
+| D-7 | **6** | `T-M40`–`T-M45` |
+| 实现级（v3 + v4） | **25** | `T-M46`–`T-M52` 7 + `T-S21`–`T-S31` 11 + `T-D50` 1 + `T-N01`–`T-N06` 6 |
+| **合计** | **90** | — |
 
-| 组 | 逻辑 | 关联 `ftsMode` | 执行 | 理由 |
+**全口径 = 100** = 57（C0.2 全部架构用例）+ 43（12 + 6 + 25）。C1-B 实现 **90** = 100 − 7（G 组已在 C1-A）− 3（`T-D32` / `T-A34` / `T-A35` 归 C3）。
+
+#### 10.11.3 逐组执行次数（XML 口径）
+
+| 组 | 逻辑 | 参数化 | 执行 | 理由 |
 |---|---|---|---|---|
-| A 迁移 13 | 13 | ❌ | 13 | 迁移"先灌 FTS 后建触发器"，与运行时 `ftsMode` 无关（§5.2 第 7–9 步） |
-| B 存储 11 | 11 | ✅ | 22 | 全部走 `insert` / `correct` |
-| C 时间 8 | 8 | ✅ | 16 | 用 `insert` 造数据 |
-| D Scope 7 | 7 | ✅ | 14 | 用 `insert` 造数据 |
-| E 删除恢复 8 | 8 | ✅ | 16 | 走 `softDelete` / `restore` |
-| D-6 的 4 条 L1（`T-X01`–`T-X03`、`T-X10`） | 4 | ❌ | 4 | 纯函数 / 枚举解析 |
-| D-6 的 8 条 L2（`T-X04`–`T-X09`、`T-X11`、`T-X12`） | 8 | ✅ | 16 | 要读真实 FTS 与 `conflicts()` |
-| D-7 的 6 条 | 6 | ❌ | 6 | `onCreate` / `onUpgrade` / `onOpen` 的结构断言 |
-| `T-M46` | 1 | ❌ | 1 | 迁移后插一行，不涉及 FTS 检索 |
-| `T-S21`–`T-S24` | 4 | ✅ | 8 | 本来就是"两档对比"，双跑是设计本身 |
-| `T-N01`–`T-N05` | 5 | ✅ | 10 | 并发写，`APP_SYNC` 下多一次 `syncFts` |
-| **合计** | **75** | — | **126** | 单跑 24 + 双跑 51×2 |
+| A 迁移 | 20 | 单 | 20 | 迁移"先灌 FTS 后建触发器"，与运行时 `ftsMode` 无关 |
+| B 存储 | 11 | 双 | 22 | 全部走 `insert` / `correct` |
+| C 时间 | 8 | 双 | 16 | 用 `insert` 造数据 |
+| D Scope | 7 | 双 | 14 | 用 `insert` 造数据 |
+| E 删除恢复 | 9 | 8 双 + 1 三档 | 19 | 走 `softDelete` / `restore`；`T-D50` 明确三档 |
+| D-6 的 4 条 L1 | 4 | 单 | 4 | 纯函数 / 枚举解析 |
+| D-6 的 8 条 L2 | 8 | 双 | 16 | 要读真实 FTS 与 `conflicts()` |
+| D-7 的 6 条 | 6 | 单 | 6 | `onCreate` / `onUpgrade` / `onOpen` 的结构断言 |
+| S 写入职责 4（`T-S21`–`T-S24`） | 4 | **单** | 4 | 每条固定一档（`TRIGGER` / `APP_SYNC` / `NONE` / 无档依赖），**不双跑** |
+| S 探测缓存 7（`T-S25`–`T-S31`） | 7 | 单 | 7 | 探测层，不调 `MemoryStore` 写方法 |
+| N 并发 6 | 6 | 双 | 12 | 两档都要验 FTS 一致性 |
+| **合计** | **90** | — | **140** | — |
 
 ```
-C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 126 = 457
-逻辑新增 75 条，实际执行 126 次，差值 51 是双跑的第二遍
+C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 140 = 471
+逻辑 90 条；执行 140 次 = 单跑 41 + 双跑 48×2 + 三档 1×3
 ```
 
-#### 10.11.3 三个数字的关系（防止后面看混）
+#### 10.11.4 三个数字的关系（防止后面看混）
 
 | 数字 | 含义 | 谁在用 |
 |---|---|---|
 | `57` | C0.2 §11.2 定义的**架构用例**总数 | C0.2 的验收口径，不变 |
-| `85` | C1-B 的**全口径逻辑用例数**（57 + 28） | 本文 §15 的阶段验收 |
-| `75` | C1-B **新增**逻辑用例（47 架构 + 28 决策） | 逻辑口径的加数 |
-| `126` | C1-B **新增执行次数**（含双跑） | XML 口径的加数 |
-| `457` | **XML 目标**（331 + 126） | §16 退出条件 #2 |
+| `100` | **全口径**（57 + 43 实现级） | 追溯用，不进 XML |
+| `90` | C1-B **新增**逻辑用例 | 逻辑口径的加数 |
+| `140` | C1-B **新增执行次数**（含双跑与三档） | XML 口径的加数 |
+| `471` | **XML 目标**（331 + 140） | §16 退出条件 #2 |
 
-> **v2 的 396 错在哪**：它等于 `331 + 65`，其中 65 是逻辑数、331 是 XML 数。加法把两种口径混在一起，导致"双跑"在门禁里不可见。v3 的 457 与 75 各自内部自洽，且 457 可以用 `grep -c "@Test"` 与实际执行报告交叉验证。
+> **v3 的 457 错在哪**：它把 `T-S21`–`T-S24` 这 4 条"各自固定一档"的用例算成双跑，虚增 4 次执行。
+> **v2 的 396 错在哪**：`331 + 65`，把逻辑数加到 XML 数上，导致双跑在门禁里完全不可见。
+> v4 的 140 是**逐条数参数化次数**得到的：三个数字之间满足 `90 = 41 + 48 + 1`、`140 = 41 + 96 + 3`、`471 = 331 + 140`，任一处改动都必须让另两处跟着变。
 >
-> **如果将来决定不双跑全部 51 条**（例如只双跑 B/E 两组），`126` 会下降，但**必须同时改 §10.11.2 的表**，不能只改总数——否则就又回到"总数与明细对不上"的老问题。
+> **A-2 的判据同步更新**：§20.4 的 A-2 从"51 条双跑"改为"48 条双跑 + 1 条三档"，并与 §10.11.1 的按文件表逐条对应。
 
-### 10.12 v3 新增用例（10 条）
+### 10.12 v3 新增用例（10 条，v4 保留）
 
 这 10 条不是"补充覆盖"，每一条都对应本轮修掉的一个缺陷；**去掉任何一条，那个缺陷就会重新变成"文档里写了、没人验"**。
 
@@ -3001,16 +3568,16 @@ C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 126 = 457
 | 断言 | ① 新 id == `MAX(迁移 id) + 1`；② `sqlite_sequence.seq >= MAX(id)`；③ 再插一行，id 继续 +1；④ 两次插入不抛 `UNIQUE constraint failed: zhuli_memory_item.id` |
 | 反例 | 若迁移用 `UPDATE sqlite_sequence` 且无行可更，新 id 会从 1 开始 → 撞已迁移的 id=1 → 断言 ④ 失败 |
 
-#### 10.12.2 `T-S21`–`T-S24`｜FTS 写入职责（P0-5）
+#### 10.12.2 `T-S21`–`T-S24`｜FTS 写入职责（v3 P0-5）
 
 | 编号 | 用例 | 前置 | 断言 |
 |---|---|---|---|
 | `T-S21` | `TRIGGER` 档不双写 | `ftsModeOverride=TRIGGER`，插入 1 条 | FTS 行数 == 1（不是 2）；不抛约束；`syncFts` 调用计数 == 0（用可注入的计数钩子或 `grep` 保证代码路径） |
-| `T-S22` | `APP_SYNC` 档 7 条路径都不漏写 | `ftsModeOverride=APP_SYNC`；依次执行 insert / correct / confirm / resolveConflict / expire / softDelete / restore | 每一步后 FTS 行数 == `COUNT(item WHERE status<>'DELETED')`；任一步不等即失败 |
+| `T-S22` | `APP_SYNC` 档 **6 条**路径都不漏写 | `ftsModeOverride=APP_SYNC`；依次执行 insert / correct / confirm / resolveConflict / softDelete / restore（**`expire` 已移出 C1-B**，§7.2） | 每一步后 FTS 行数 == `COUNT(item WHERE status<>'DELETED')`；任一步不等即失败 |
 | `T-S23` | `NONE` 档 `search_text` 仍写 | `ftsModeOverride=NONE`，插入含中文的值 | `search_text` 非空；`search("关键词")` 能命中；**同时**断言 scope / sensitivity / status / 生效区间四个约束仍在（造一条越界数据，确认不被捞出） |
 | `T-S24` | 同一 source 重复 → `Duplicate` | 同一 `SourceRef`（同 `refId` + 同 `contentHash`）连续 `insert` 两次同值 | 第一次 `Created`，第二次 `Duplicate`；item 行数 1；evidence 行数 1；`seen_count=2`；**revision 行数仍为 1**（`Duplicate` 不写 revision） |
 
-> `T-S22` 是唯一一条"一条用例覆盖 7 个方法"的用例。它不是偷懒：7 条路径的断言完全相同（FTS 行数 == 未删行数），拆成 7 条会让 §10.11.2 的双跑数从 8 涨到 14，而覆盖的缺陷是同一个（漏调 `syncFts`）。如果将来某条路径出现独立缺陷，再拆。
+> `T-S22` 是一条"一条用例覆盖 6 个方法"的用例。它不是偷懒：6 条路径的断言完全相同（FTS 行数 == 未删行数），拆成 6 条只会让编号膨胀，而覆盖的缺陷是同一个（漏调 `syncFts`）。如果将来某条路径出现独立缺陷，再拆。
 
 #### 10.12.3 `T-N01`–`T-N05`｜并发（验收细节 1）
 
@@ -3030,6 +3597,54 @@ C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 126 = 457
 
 
 ---
+
+### 10.13 v4 新增用例（15 条）
+
+这 15 条与 §10.12 的 10 条同性质：**每条对应一个已修缺陷，去掉哪条，那个缺陷就重新变成"文档写了、没人验"**。
+
+#### 10.13.1 迁移与唯一索引（6 条，`MemoryMigratorTest`）
+
+| 编号 | 用例 | 前置 / 动作 | 断言 |
+|---|---|---|---|
+| `T-M47` | 三个唯一索引存在且定义正确 | `seedLegacy(11)` → 迁移 → 查结构 | ① `pragma_index_list` 三张表各命中 1 行且 `unique=1`；② `sqlite_master.sql` 与 `EXPECTED_INDEXES` 归一化后全等；③ 向 `zhuli_memory_source` 插同 5 元组、向 `zhuli_memory_evidence` 插第二个 `PRIMARY`、向 item 插同 `dedupe_key` 的 ACTIVE，**三者都抛 `SQLiteConstraintException`** |
+| `T-M48` | 预检冲突 → 中止并回滚 | 用 `MemoryMigrator.faultAfterRows`（`@VisibleForTesting`）在数据迁完后插入一条重复 `zhuli_memory_source` | ① 抛 `MigrationConflictException`，`table="zhuli_memory_source"`、`groups=1`；② `user_version=16`；③ `zhuli_fact` 仍在且有全部行；④ `zhuli_memory_item` 不存在；⑤ 备份文件仍在（回滚不回滚备份） |
+| `T-M49` | 新建库与升级库结构一致 | 路径 A：`deleteDatabase` 后打开；路径 B：`seedLegacy(11)` 后升级 | 两条路径的 15 个显式索引 `(name, unique, columns, where)` 集合相等；4 个自动索引名集合相等；`PRAGMA table_info` 的 40 列逐一相等 |
+| `T-M50` | WAL 下拒绝且不备份 | `openDatabase(path, null, OPEN_READWRITE or ENABLE_WRITE_AHEAD_LOGGING)` 打开 v16 库 → 调 `MigrationBackup.checkAndBackup` | ① 抛 `UnsupportedJournalModeException`；② 备份目录文件数不变；③ `PRAGMA journal_mode` 仍是 `wal`；④ `user_version=16`；⑤ 行数不变 |
+| `T-M51` | 允许模式下备份成功 | `journal_mode=delete` 的 v16 库 → 调 `checkAndBackup` | ① 返回 `Copied`；② 备份文件存在且大小 >0；③ 对备份文件 `PRAGMA integrity_check=ok`；④ 行数与原库相等；⑤ `lastBackupError=null` |
+| `T-M52` | sequence 对齐幂等 | 人为往 `sqlite_sequence` 插 3 行 `('zhuli_memory_item', 7)` → 调 `alignSequence` 两次 | ① 两次后都恰好 1 行；② `seq >= MAX(id)`；③ 第二次调用 `changes()` 路径不新增行；④ 之后插入新行 id 单调 +1 |
+
+> `T-M48` 的注入点 `faultAfterRows` 与 `FtsProbe.dropInterceptor` 同性质：`internal var`，只有测试赋值，release 无调用方。自检命令里用一条 `grep` 覆盖两者（§8.5.2 第 18 条）。
+
+#### 10.13.2 探测清理与缓存（7 条，`MemorySchemaTest`）
+
+| 编号 | 用例 | 动作 | 断言 |
+|---|---|---|---|
+| `T-S25` | 探测成功 + 清理成功 | 正常 `detectFtsMode` | ① 返回 `TRIGGER`；② `sqlite_master` 与 `sqlite_temp_master` 均无 `zhuli_fts_probe_%`；③ 缓存写入 `TRIGGER` |
+| `T-S26` | `DROP TRIGGER` 失败 | `dropInterceptor` 对 `*_ai` 抛异常 | ① 返回 `APP_SYNC` 且 `reason="cleanup_failed"`；② 缓存**没有** `TRIGGER`（`get()` 返回 null）；③ 本次残留对象由测试 `@After` 强制清理 |
+| `T-S27` | `DROP TABLE` 失败 | 拦截器对 `*_item` 抛异常 | 同 `T-S26` |
+| `T-S28` | 静默残留（不抛、不删） | 拦截器对 `*_ai` 直接 `return`（不执行 DROP） | 同 `T-S26`，且断言 `detail` 里含 `residue:` ——证明是"残留扫描"抓到的，不是"异常"抓到的 |
+| `T-S29` | 数量=3 但定义错 | 迁移后 DROP `_au` 并重建为 `AFTER UPDATE ON`（去掉 `OF`） | ① `verifyFtsTriggers=false`；② `FtsModeCache.get()` 返回 null；③ `ensureAll` 调 `repair` 后 `verify=true`；④ `touchUsed` 不再改变 FTS 行数 |
+| `T-S30` | 触发器挂错表 | DROP `_ai`，在 `zhuli_memory_source` 上建同名触发器 | ① `verify=false`（`tbl_name` 不匹配）；② 缓存失效；③ `repair` 后三个触发器都回到 `zhuli_memory_item` |
+| `T-S31` | WAL 下探测降级 | 对 `enableWriteAheadLogging()` 的库调 `detectFtsMode` | ① 返回 `APP_SYNC` 且 `reason="wal"`；② 缓存未写；③ 不创建任何探测对象；④ `disableWriteAheadLogging()` 后再探测 → `TRIGGER` |
+
+#### 10.13.3 `T-D50`｜softDelete 三档职责（1 条 / 3 次，`MemoryStoreTest`）
+
+| 项 | 内容 |
+|---|---|
+| 参数化 | 同一个测试体跑三次：`ftsModeOverride = TRIGGER / APP_SYNC / NONE`（用三个具名子类，便于报告定位） |
+| 前置 | 每种模式各造一条 ACTIVE + 一条 FTS 行（NONE 档无 FTS 表） |
+| 动作 | `softDelete(id, now)` → 查 FTS 行数 → `restore(id, now)` → 再查 |
+| 断言 | ① `TRIGGER`：`syncFtsCalls == 0`，删除后 FTS 行数 -1，恢复后 +1；② `APP_SYNC`：`syncFtsCalls == 1`（删除）/ 2（含恢复），行数同上；③ `NONE`：不抛 `no such table`，`search_text` 仍在；④ 三档都不出现 `DELETE FROM zhuli_memory_fts` 的直接调用（`syncFtsCalls` 与行数即可证明） |
+| 反例 | 若照 v3 §7.6 写死 `DELETE`：`TRIGGER` 档 `syncFtsCalls` 仍为 0 但会与触发器重复删除（换 `AFTER DELETE` 后暴露）；`NONE` 档直接抛 `no such table` → 用例失败 |
+
+#### 10.13.4 `T-N06`｜8 线程 × 多连接（1 条 / 2 次，`MemoryStoreTest`）
+
+| 项 | 内容 |
+|---|---|
+| 参数化 | `TRIGGER` / `APP_SYNC` 各一次 |
+| 动作 | 8 个线程，每线程 50 次：`insert` 一条新值 → `softDelete` 它；每线程进入时读 `PRAGMA trusted_schema` 与 `PRAGMA journal_mode` |
+| 断言 | ① 8 个线程读到的两个 pragma 值完全一致；② 无未捕获异常；③ `COUNT(fts) == COUNT(item WHERE status<>'DELETED')`；④ `PRAGMA integrity_check=ok`；⑤ 结束后 `sqlite_sequence` 无重复同名行 |
+| 为什么需要 | `T-N01`–`T-N05` 只测状态机并发，没测"多线程 × FTS 索引一致性"；P1-6 的连接一致性需要一条真正多线程的用例来兜 |
 
 ## 11. 数据迁移预演计划
 
@@ -3081,7 +3696,7 @@ C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 126 = 457
 ③ 5 条时间断言：1/2/4/5 = 0；3 允许 >0 但必须记入 vf_mismatch
 ④ PRAGMA integrity_check = ok
 ⑤ PRAGMA foreign_key_check = 空（虽然没建外键，仍跑一次防将来加）
-⑥ sqlite_sequence.seq == MAX(id)（9 张 AUTOINCREMENT 表逐张；表不存在则跳过，见 §5.7）
+⑥ sqlite_sequence：`zhuli_memory_item` 同名行**恰好 1 行**且 `seq >= MAX(id)`；9 张 AUTOINCREMENT 表逐张 `GROUP BY name HAVING COUNT(*)>1` 必须 0 行（表不存在则跳过，见 §5.7）
 ⑦ zhuli_fact 不存在 / zhuli_fact_v1 存在
 ⑧ FTS 行数 == COUNT(item WHERE status<>'DELETED')（TRIGGER 与 APP_SYNC 两档都要满足）
 ```
@@ -3239,7 +3854,7 @@ C1-B 在 `onDowngrade` 里**不做任何事**（保持 `SQLiteOpenHelper` 默认
 | **影响范围** | 换一台 ROM 落到 `APP_SYNC` 时行为不同 → 用户侧"有的机器能搜到、有的搜不到" |
 | **代码位置** | `MemoryStore` 的构造参数 `ftsModeOverride`；`MemorySchema.detectFtsMode` |
 | **预防** | ① `MemoryStore(db, ftsModeOverride: FtsMode? = null)`——测试传 `APP_SYNC`，生产不传；② **全部 L2 用例跑两遍**（TRIGGER / APP_SYNC）；③ `NONE` 单独一组 3 条（检索降级但权限不降） |
-| **验收** | 双跑的 51 条（§10.11.2 名单）× 2 模式全绿 = 102 次执行；单跑 24 条各 1 次；合计 126 次。v2 写"47 条 × 2"是错的：A 组迁移 13 条与 D-7 的 6 条不碰 `ftsMode`，只跑一遍；`grep "ftsModeOverride" app/src/main` 只命中构造参数与 `if` 分支（无生产调用方传值） |
+| **验收** | 双跑的 **48 条**（§10.11.1 名单）× 2 模式全绿 = 96 次；三档 1 条（`T-D50`）= 3 次；单跑 41 条各 1 次；合计 **140** 次。v2 写"47 条 × 2"是错的（A 组迁移与 D-7 不碰 `ftsMode`）；v3 又把 4 条固定档位的用例算成双跑，v4 已改；`grep "ftsModeOverride" app/src/main` 只命中构造参数与 `if` 分支（无生产调用方传值） |
 
 > `[实现补充]` 这是 C0.2 没写、但必须有的测试夹层。没有它，"两种模式行为一致"只是一句口号。
 
@@ -3290,7 +3905,7 @@ C1-B 在 `onDowngrade` 里**不做任何事**（保持 `SQLiteOpenHelper` 默认
 | **发生条件** | ① 迁移在后台 Worker 里触发，主线程同时在跑 Agent 任务，写 `zhuli_agent_task` 被写锁挡住；② 通知回调（~10s 预算）撞上 3s 迁移 → 丢通知；③ 迁移失败导致任务状态机读到"库打不开" |
 | **影响范围** | 任务步骤延迟、通知丢失；**不会**损坏任务数据（迁移不碰 `zhuli_agent_task`） |
 | **代码位置** | `InboxDatabase.onUpgrade`；`agent/SqlAgentStore`；`ZhuliAgentRuntime.init` 的 `markOrphansPaused` |
-| **预防** | ① 迁移在**单个事务**内完成，失败整体回滚（不会半迁移）；② 迁移范围**不含** `zhuli_agent_task` / `zhuli_agent_step`（`git diff` 可证：`MemoryMigrator` 只碰 `zhuli_fact*` 与 `zhuli_memory_*`）；③ 耗时上界 3s（D2），超则启用 C0.2 §9.6 的分批方案；④ debug 下加线程断言，把"迁移发生在哪个线程"打进日志（A-4）；⑤ B1 的 12 场景回归（D8）验证状态机轨迹不变 |
+| **预防** | ① 迁移在**单个事务**内完成，失败整体回滚（不会半迁移）；② 迁移范围**不含** `zhuli_agent_task` / `zhuli_agent_step`（`git diff` 可证：`MemoryMigrator` 只碰 `zhuli_fact*` 与 `zhuli_memory_*`）；③ 耗时上界 3s / 20k 12s（D2）；超门槛按 §5.13.1 的四级处置——**只做"分批处理、单事务提交"，不得切多事务、不得分批提交**（v4 统一：v3 这里还残留"C0.2 §9.6 分批方案"的旧说法，已删）；④ debug 下加线程断言，把"迁移发生在哪个线程"打进日志（A-4）；⑤ B1 的 12 场景回归（D8）验证状态机轨迹不变 |
 | **验收** | D2（耗时）+ D8（12 场景）；`MemoryMigrationTimingTest` 打印 `thread=` 字段；迁移日志的 `ms` ≤ 3000 |
 
 > 一个尚未验证的点：迁移期间若有 `NotificationListenerService` 回调，`getWritableDatabase` 会阻塞到迁移提交。C1-B5 的 D1 手工步骤里加一条"迁移进行中发一条通知"，观察是否丢失。**这是 §19 的遗留项 U-3。**
@@ -3322,8 +3937,8 @@ C1-B 在 `onDowngrade` 里**不做任何事**（保持 `SQLiteOpenHelper` 默认
 | **发生条件** | ① 缓存写入后，触发器被外部删掉（用户清库、部分恢复、ROM 工具）；② `ensureAll` 尝试补建触发器但失败（磁盘满 / `trusted_schema=OFF` 的坏环境）；③ 缓存命中时只看 `mode` 字符串，不校验结构 |
 | **影响范围** | `MemoryStore` 认为"触发器会同步"，于是**不调** `syncFts` → 新写入的记忆永远搜不到，且没有任何报错。这是"看起来正常但漏结果"里最难查的一类 |
 | **代码位置** | `FtsModeCache.get()`（§6.4 第 5/6 道门）；`MemorySchema.ensureAll()` 的补建分支；`MemoryStore` 的 `if (ftsMode == APP_SYNC)` 分支 |
-| **预防** | ① `get()` 在 `mode==TRIGGER` 时必须 `countFtsTriggers(db)==3`，否则返回 null 触发重探；② `mode!=NONE` 时必须 `tableExists(zhuli_memory_fts)`；③ `ensureAll` 补建过任何 FTS 对象后**主动 `prefs.remove(KEY_MODE)`**；④ `selfCheck` 第 1/2 条作为事后兜底 |
-| **验收** | §9.3 的缓存失效五场景（第 ⑤ 条"删 1 个触发器"、第 ⑥ 条"DROP FTS 表"）；`T-S21`（TRIGGER 档写一次只产生 1 行）；`selfCheck` 在人为破坏后返回非空 |
+| **预防** | ① `get()` 在 `mode==TRIGGER` 时必须 `verifyFtsTriggers(db)`（名称 + 表 + 事件 + SQL 归一化，§6.4.1），否则返回 null 触发重探；② `mode!=NONE` 时必须 `tableExists(zhuli_memory_fts)`；③ `ensureAll` 补建/修复过任何 FTS 对象后**主动 `prefs.remove(KEY_MODE)`**；④ `selfCheck` 第 1/2 条作为事后兜底 |
+| **验收** | §9.3 的缓存失效六场景（含"删 1 个触发器""DROP FTS 表"）；`T-S21`（TRIGGER 档写一次只产生 1 行）；**`T-S29`/`T-S30`（数量=3 但定义错 → 缓存必须失效）**；`selfCheck` 在人为破坏后返回非空 |
 
 ---
 
@@ -3410,10 +4025,10 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 | 阶段 | 完成条件（全部满足才算完成） | 证据 |
 |---|---|---|
 | **C1-B1** | ① 新装库有 7 表 + **15 显式 + 4 自动**索引、`user_version=17`、无 `zhuli_fact` 与 `zhuli_fact_v1`；② 连开 3 次幂等；③ `MemoryTextTest` 5 组全绿；④ `FactStatus` 七值解析 + 未知值兜底全绿（`T-X01`/`T-X02`/`T-X04`）；⑤ `git diff` 只含 **§8.5.1 的 11 个文件**（生产 7 + 测试 4） | `MemorySchemaTest` 输出 + `sqlite_master` 查询 + `T-M40` |
-| **C1-B2** | ① 4 档库账本闭合（6 类终态，`failed=0`）；② 10 组不变量 + 5 条时间断言 + **第 6/6b 条状态断言（含 `NULL`）**；③ `integrity_check=ok`；④ 5 种故障注入全回滚；⑤ 设备 5k ≤3s；⑥ **`T-M41`–`T-M46` 全绿**；⑦ `oldVersion=14/15/16` 三条路径各成功一次 | `Temp/c1b/` 日志 + `MemoryMigrationTimingTest` + `MemoryMigratorTest` |
-| **C1-B3** | ① 探测缓存命中（5 次打开只探 1 次）；② **缓存六道门逐条可验**（§6.4）；③ 坏环境（`trusted_schema=OFF`）返回 `APP_SYNC`；④ 三档检索都带全 4 个约束；⑤ `LIKE` 已转义；⑥ `selfCheck` 第 1/2 条能报出人为破坏 | `MemorySchemaTest` + 设备日志 |
-| **C1-B4** | ① 27 个签名不变；② 现有 15 例只改 1 处即绿；③ 架构 47 条（双跑 34 条）全绿；④ `T-C57` 通过；⑤ `selfCheck` 干净库返回空；⑥ 六态投影与冲突 12 条全绿；⑦ **FTS 写入职责 4 条（`T-S21`–`T-S24`）全绿**；⑧ **并发 5 条（`T-N01`–`T-N05`）全绿** | `testDevDebugUnitTest` 报告 |
-| **C1-B5** | ① 全量 **XML ≥ 457** 全绿（逻辑 75 / 执行 126）；② D1–D10 全过；③ §8.5.2 的 17 条命令（1 准备 + 16 自检）全部符合期望值；④ 报告交付 | 报告 + 命令输出 |
+| **C1-B2** | ① 4 档库账本闭合（6 类终态，`failed=0`）；② 10 组不变量 + 5 条时间断言 + **第 6/6b 条状态断言（含 `NULL`）**；③ `integrity_check=ok`；④ 5 种故障注入全回滚 + 唯一冲突（`T-M48`）+ WAL（`T-M50`）；⑤ 设备 5k ≤3s；⑥ **`T-M41`–`T-M52` 全绿**；⑦ `oldVersion=14/15/16` 三条路径各成功一次；⑧ **三个唯一索引在升级库与新建库中结构一致**（`T-M47`/`T-M49`）；⑨ `sqlite_sequence` 同名行恒为 1（`T-M46`/`T-M52`） | `Temp/c1b/` 日志 + `MemoryMigrationTimingTest` + `MemoryMigratorTest` |
+| **C1-B3** | ① 探测缓存命中（5 次打开只探 1 次）；② **缓存六道门逐条可验**（§6.4）；③ 坏环境（`trusted_schema=OFF`）返回 `APP_SYNC`；④ 三档检索都带全 4 个约束；⑤ `LIKE` 已转义；⑥ `selfCheck` 第 1/2 条能报出人为破坏；⑦ **清理失败三态（DROP TRIGGER / DROP TABLE / 静默残留）全部降级且不缓存 TRIGGER**（`T-S26`–`T-S28`）；⑧ **触发器数量=3 但定义错 → 缓存失效并修复**（`T-S29`/`T-S30`）；⑨ **WAL 下返回 `APP_SYNC` 且关掉 WAL 能回到 `TRIGGER`**（`T-S31`） | `MemorySchemaTest` + 设备日志 |
+| **C1-B4** | ① 27 个签名不变；② 现有 15 例只改 1 处即绿；③ 架构 47 条（双跑 34 条）全绿；④ `T-C57` 通过；⑤ `selfCheck` 干净库返回空；⑥ 六态投影与冲突 12 条全绿；⑦ **FTS 写入职责 4 条 + `T-D50` 三档全绿**；⑧ **并发 6 条（`T-N01`–`T-N06`）全绿**；⑨ `softDelete` 不直接操作 FTS（`grep "DELETE FROM zhuli_memory_fts" MemoryStore.kt` = 1 处，在 `syncFts` 内） | `testDevDebugUnitTest` 报告 |
+| **C1-B5** | ① 全量 **XML ≥ 471** 全绿（逻辑 90 / 执行 140）；② D1–D10 全过；③ §8.5.2 的 19 条命令（1 准备 + 18 自检）全部符合期望值；④ 报告交付 | 报告 + 命令输出 |
 
 
 ---
@@ -3425,7 +4040,7 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 | # | C0.2 的条件 | 本方案的证据 | 现状 |
 |---|---|---|---|
 | 1 | `ftsMode` 结论给出，G 组 7 条在设备通过 | C1-A 报告 §7.1（`TRIGGER`）+ `MemoryFtsInstrumentedTest` 9/9 | **已完成**（C1-A） |
-| 2 | `testDevDebugUnitTest` 全绿，**XML `tests` ≥ 331 + 126 = 457**（逻辑 75 条，§10.11） | 测试报告 XML 的 `testsuite tests` 属性 | 未执行 |
+| 2 | `testDevDebugUnitTest` 全绿，**XML `tests` ≥ 331 + 140 = 471**（逻辑 90 条，§10.11） | 测试报告 XML 的 `testsuite tests` 属性 | 未执行 |
 | 3 | 无 `@Ignore`、无 `assumeTrue` 跳过 | grep 查 `@Ignore` 与 `assumeTrue` = 0 | 未执行 |
 | 4 | `git diff --name-only BASE_IMPL..HEAD -- app/` ⊆ §8.5.1 的白名单（**21 个文件** = 7 生产新增 + 4 生产修改 + 9 测试新增 + 1 测试修改） | 命令输出逐行比对；`BASE_IMPL` 由 C1-B5 报告第一节填写 | 未执行 |
 | 5 | 真实副本迁移：账本闭合、10 组 + 5 条 + 第 6/6b 条断言全 0、`integrity_check=ok` | `Temp/c1b/` 的 4 份日志 | 未执行 |
@@ -3438,15 +4053,17 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 
 | # | 条件 | 理由 |
 |---|---|---|
-| 10 | **双跑的 51 条**在 `TRIGGER` 与 `APP_SYNC` 下都绿（K-7） | v2 写"47 条架构用例都绿"，但 A 组迁移 13 条与 D-7 6 条与 `ftsMode` 无关、只跑一遍。实际双跑的是 51 条（§10.11.2） |
+| 10 | **双跑的 48 条 + 三档的 1 条**都绿（K-7） | v2 写"47 条架构用例都绿"，但 A 组迁移与 D-7 与 `ftsMode` 无关、只跑一遍；v3 又把 4 条固定档位的用例误算成双跑。实际双跑 48 条、三档 1 条（§10.11.1） |
 | 11 | `git diff --check` 无空白错误 | 交付卫生 |
 | 12 | 生产代码新增 ≤ 1,500 行（含 §8.1 的 40 行超支） | 防止"顺手重构" |
 | **13** | **X-1 关闭（D-7）**：v17 库（新装与升级两条路径）都不存在 `zhuli_fact`；`onOpen` 连开 3 次不复活；旧写路径抛 `no such table` 而非静默写入；`createCoreTablesV15` 保留 entity/task/step/fact_vec 四张表与 3 个索引 | D-7 的 9 条要求与 6 项回归测试，逐条见 §4.8；证据 `T-M40`–`T-M45` |
 | **14** | **X-2 关闭（D-6）**：`FactStatus` 含 6 个业务值 + `UNKNOWN`；`of()` 未知值不落 `ACTIVE`；六态投影一一对应不合并；`UNKNOWN` 非当前不可激活；序列化/反序列化/DB 兼容有测试 | D-6 的 9 条要求，逐条见 §7.12；证据 `T-X01`–`T-X08` |
 | **15** | **X-3 关闭（D-6 第 7 条）**：冲突败方为 `CANDIDATE` 时 `conflicts()` 仍返回冲突对；MULTI 槽位不误报；`EXPIRED`/`REJECTED`/`DELETED`/`UNKNOWN` 不参与配对 | D-6 第 7 条；证据 `T-X09`–`T-X12` |
-| **16** | **FTS 写入职责无歧义（P0-5）**：`TRIGGER` 档不双写（W-1）、`APP_SYNC` 档 7 条路径不漏写（W-2）、`NONE` 档 `search_text` 仍写且四约束不丢（W-3） | v2 只列 4 条路径、漏了 `confirm`/`resolveConflict`/`expire`；证据 `T-S21`–`T-S23` |
+| **16** | **FTS 写入职责无歧义（P0-5）**：`TRIGGER` 档不双写（W-1）、`APP_SYNC` 档 **6 条**路径不漏写（W-2）、`NONE` 档 `search_text` 仍写且四约束不丢（W-3）、`softDelete` 不直接碰 FTS | v2 只列 4 条路径；v3 的 `expire` 已按 §7.2 方案 B 移出；证据 `T-S21`–`T-S23` + `T-D50` |
 | **17** | **并发下状态合法（验收细节 1）**：5 个写方法各 50 次并发，0 次出现"两条 ACTIVE"、0 次未捕获 `SQLiteConstraintException` | 通知流水线与 Agent 工具可能同时写；证据 `T-N01`–`T-N05` |
-| **18** | **迁移原子性不被"分批"破坏（P0-3）**：`onUpgrade` 全程单事务；`journal_mode=wal` 时显式拒绝并给出可读原因；不存在"批间提交"代码 | v2 的"`onUpgrade` 内分批提交"在 Android 嵌套事务模型下不成立；证据 = §5.1 时序表的 9 个步骤 + 代码 review |
+| **18** | **迁移原子性不被"分批"破坏**：`onUpgrade` 全程单事务；`journal_mode=wal` 时**在备份之前**显式拒绝；不存在"批间提交"代码 | v2 的"`onUpgrade` 内分批提交"在 Android 嵌套事务模型下不成立；证据 = §5.1 时序表 + `T-M50` |
+| **19** | **三个唯一索引在两条路径上都生效（P0-1）**：`idx_mi_dedupe` / `idx_ms_dedupe` / `idx_mev_primary` 在新建库与升级库中都存在、定义一致；违反时必须抛约束 | v3 的迁移只建了 `idx_mi_dedupe`；证据 `T-M47` / `T-M49` |
+| **20** | **探测结论与现场状态一致（P0-2）**：清理失败/有残留时**不返回也不缓存** `TRIGGER`；缓存命中时触发器定义必须逐字正确 | v3 先返回 TRIGGER 再清理；证据 `T-S26`–`T-S30` |
 
 > 用户指令只点名"X-1、X-2 纳入退出条件"。第 15 条（X-3）是同一条决策（D-6 第 7 条）的一部分；第 16–18 条是本轮 P0-3/P0-5 与验收细节 1 的产物——它们对应的缺陷在 v2 里是"文档写了但无法验证"的状态。
 
@@ -3469,6 +4086,7 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 | 10 | `MemoryRepo` 的最终删除（调用方直连 Store） | C4 之后 | 现在删会把 C1 扩成"改 5 个调用方 + 重写 15 个测试" |
 | 11 | 宿主 `MemoryRepository`（Room）与新表的合并 | 未排期 | 两套并存是既有决策，合并需要迁移宿主 v39 |
 | 12 | `T-D32`（硬删）/ `T-A34` / `T-A35` | C3 | C0.2 已明确"C1 只留设计" |
+| 13 | `expire()`（TASK 到期 / STATE 关闭的批量过期） | C2 | 需要定时调度与批量重试；C1-B 不引入调度器，硬加会扩大 diff 面（§7.2 方案 B） |
 
 ---
 
@@ -3483,18 +4101,20 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 
 **决策对原方案的实质影响**（不是文字游戏，逐条可核对）：
 
-| 项 | v1 | v2 | v3 | 原因 |
-|---|---|---|---|---|
-| 修改生产文件 | 2 个 | 4 个 | **4 个（不变）** | D-6 要改 `MemoryTypes.kt` 与 `MemoryRanker.kt`；v3 不新增 |
-| C1-B 新增**逻辑**用例 | 47 | 65 | **75** | v2 的 +18（D-6 12 + D-7 6）；v3 再 +10（`T-M46` / `T-S21`–`T-S24` / `T-N01`–`T-N05`） |
-| C1-B 新增**执行**次数 | — | 未区分 | **126** | 51 条双跑 + 24 条单跑（§10.11.2） |
-| 目标 XML `tests` | 378 | 396（口径错误） | **457** | 331 + 126；v2 把逻辑数加到 XML 数上 |
-| `zhuli_fact` 在 v17 的存在性 | 计划"不存在"，但方案自相矛盾（onOpen 会重建） | 结构上保证不存在，且有 4 条测试盯住 | **不变** | D-7 |
-| `EXPIRED` / `REJECTED` 的投影 | 有损合并 | 一一对应，不合并 | **不变** | D-6 第 5 条 |
-| 冲突展示 | 改 `MemoryRepo` 另算 | 改 `MemoryRanker.conflicts` | **不变** | D-6 第 7 条 |
-| 测试预算上限 | 2,000 行 | 2,400 行 | **2,800 行** | 10 条新用例 + 白名单修正（§8.4） |
-| WAL 下的迁移 | 未提 | checkpoint 后继续（**不成立**） | **拒绝** | §5.12 |
-| 迁移超时处置 | 未提 | 分批提交（**不成立**） | **分批处理、单事务提交** | §5.13.1 |
+| 项 | v1 | v2 | v3 | **v4** | 原因 |
+|---|---|---|---|---|---|
+| 修改生产文件 | 2 个 | 4 个 | 4 个 | **4 个（不变）** | v4 只改文档，不动 `app/src` |
+| 新增**逻辑**用例 | 47 | 65 | 75 | **90** | v4 +15（`T-M47`–`T-M52` / `T-S25`–`T-S31` / `T-D50` / `T-N06`） |
+| 新增**执行**次数 | — | 未区分 | 126 | **140** | 双跑从 51 降到 48（`T-S21`–`T-S24` 不双跑）+ 新增 18 次 |
+| 目标 XML `tests` | 378 | 396（口径错误） | 457 | **471** | 331 + 140 |
+| `zhuli_fact` 在 v17 的存在性 | 计划"不存在"，但方案自相矛盾（onOpen 会重建） | 结构上保证不存在，且有 4 条测试盯住 | 不变 | **不变** | D-7 |
+| `EXPIRED` / `REJECTED` 的投影 | 有损合并 | 一一对应，不合并 | 不变 | **不变** | D-6 第 5 条 |
+| 冲突展示 | 改 `MemoryRepo` 另算 | 改 `MemoryRanker.conflicts` | 不变 | **不变** | D-6 第 7 条 |
+| 测试预算上限 | 2,000 行 | 2,400 行 | 2,800 行 | **3,300 行** | 15 条新用例（§8.4） |
+| WAL 下的迁移 | 未提 | checkpoint 后继续（**不成立**） | 拒绝（但在备份之后） | **备份前拒绝** | §5.12 |
+| 迁移超时处置 | 未提 | 分批提交（**不成立**） | 分批处理、单事务提交 | **不变** | §5.13.1 |
+| `expire()` | 未提 | 有写路径、无 API | 同 v2（矛盾） | **明确不做，归 C2** | §7.2 |
+| 唯一索引（迁移路径） | 未提 | 只建 `idx_mi_dedupe` | 同 v2 | **三个全建 + 预检** | §5.2.1 |
 
 ### 18.2 仍然有效的 C0.2 待决（D-1–D-5）
 
@@ -3515,6 +4135,15 @@ v3 没有推翻任何 D-6 / D-7 的结论，但**撤销了 v2 自己在实现层
 
 > 这两条不是"方案选择"，是"技术上不成立"。v3 保留它们的错误描述在修订对照表里，方便核对"为什么改"；正文只保留正确版本，避免实现者看到两种说法。
 
+### 18.5 v4 的四项"撤销"（同样是纠错，不是改主意）
+
+| # | v3 的结论 | v4 的结论 | 依据 |
+|---|---|---|---|
+| 1 | §5.12：`journal_mode` 断言放在 `MemoryMigrator` 第 0 步（备份之后） | **移到备份函数第一行**，模式不合法时一个字节都不拷 | WAL 下主库文件不含未 checkpoint 的页；备份先做就等于生成一个"看起来成功"的坏备份（§5.12） |
+| 2 | §5.7：`INSERT OR REPLACE INTO sqlite_sequence` | **`UPDATE` → `changes()` → `INSERT`**，并断言同名恰好 1 行 | `sqlite_sequence` 的 `name` 无唯一约束（`pragma index_list` 返回空），`REPLACE` 退化为 `INSERT`，每次对齐多一行（§5.7） |
+| 3 | §6.2：`return finish(TRIGGER)`，清理在 `finally` | **先清理、再验残留、最后才决定**；清理失败 → `APP_SYNC` 且不缓存 | 先缓存后清理，清理失败被吞 → "TRIGGER + 残留"同时成立（§6.2） |
+| 4 | §6.3 / §7.5 / §10.12：`expire()` 写路径 | **C1-B 不实现**，从 API/事务表/转换表/测试/双跑判据中移除，归 C2 | 文档要求实现、接口却不存在；它是维护型批量操作，C1-B 没有调度器（§7.2） |
+
 
 ---
 
@@ -3534,25 +4163,28 @@ v3 没有推翻任何 D-6 / D-7 的结论，但**撤销了 v2 自己在实现层
 □ B2-3  来源与证据（SECRET 先判后写）
 □ B2-4  替代链 + 断链
 □ B2-5  合并 + 向量
-□ B2-6  FTS + 唯一索引 + 改名
-□ B2-7  账本闭合 + 6 条断言（含第 6/6b 条，覆盖 NULL）
-□ B2-8  sqlite_sequence（INSERT OR REPLACE）+ T-M46
-□ B2-9  MemoryMigratorTest 13 + 5 + 1 条（T-M41..T-M46）
+□ B2-6  FTS 灌数据 + 触发器
+□ B2-7  三个唯一索引：预检 → 建 → 验证（T-M47/M48/M49）
+□ B2-8  账本闭合 + 6 条断言（含第 6/6b 条，覆盖 NULL）
+□ B2-9  sqlite_sequence（UPDATE→changes→INSERT）+ T-M46/M52
+□ B2-10 备份前 journal_mode 闸门 + T-M50/M51
+□ B2-11 MemoryMigratorTest 20 + 5 条（T-M41..T-M52）
 
-□ B3-1  FtsModeCache（六道门）    □ B3-4  attach 接入
-□ B3-2  detectFtsMode 七步        □ B3-5  负向验证（trusted_schema=OFF）
-□ B3-3  createFts/syncFts         □ B3-6  缓存失效五场景（§6.4）
+□ B3-1  FtsModeCache（六道门）      □ B3-5  负向验证（trusted_schema=OFF）
+□ B3-2  FtsProbe（清理→残留→决定）  □ B3-6  缓存失效六场景（§6.4）
+□ B3-3  FtsTriggers.verify/repair    □ B3-7  清理失败注入 T-S26..S28 + 定义校验 T-S29/S30
+□ B3-4  createFts/syncFts + attach   □ B3-8  WAL 降级 T-S31
 
 □ B4-1  MemoryPolicy          □ B4-6  MemoryRepo 投影重写 + projectStatus()
 □ B4-2  insert                □ B4-7  MemoryTestFixture + scope 用例
 □ B4-3  correct/confirm/resolve□ B4-8  selfCheck
 □ B4-4  softDelete/restore    □ B4-9  conflictFacts + 六态投影（T-X05..T-X12）
-□ B4-5  查询 API（7 个）       □ B4-10 FTS 写入职责（T-S21..T-S24）
-                              □ B4-11 并发 5 条（T-N01..T-N05）
+□ B4-5  查询 API（7 个）       □ B4-10 FTS 写入职责（T-S21..S24 + T-D50）
+                              □ B4-11 并发 6 条（T-N01..N06）
 
-□ B5-1  全量 XML ≥457（逻辑 75 / 执行 126）
-□ B5-2  D1–D4/D6/D7/D9/D10    □ B5-5  §8.5.2 的 17 条命令全过
-□ B5-3  D8（B1 12 场景）       □ B5-6  C1-B 报告
+□ B5-1  全量 XML ≥471（逻辑 90 / 执行 140）
+□ B5-2  D1–D4/D6/D7/D9/D10    □ B5-5  §8.5.2 的 19 条命令全过
+□ B5-3  D8（B1 12 场景）       □ B5-6  C1-B 报告 + §20 的关闭表
 □ B5-4  D5（飞行模式）
 ```
 
@@ -3606,8 +4238,10 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 | U-9 | 回填产生的大量 `CANDIDATE` 会进入 `conflicts()`，"需要裁决"可能一次显示几十上百组 | C1 的 UI 只能列表展示，没有批量操作（§7.11） | C2 的批量裁决 UI + 按证据强度排序 |
 | U-10 | `createFactTableV15` 的 DDL 与 v16 现状是两份代码，未来若改 v16 会漂移 | 迁移源表结构必须逐字一致 | `T-M02` 兜住；review 时逐列对照 |
 | U-11 | `conflicts()` 返回 3 组以上时 UI 的排序未定义 | 只影响展示顺序，不影响正确性 | C2 的冲突面板设计 |
-| U-12 | `trusted_schema` 是**连接级** pragma，探测只证明了"探测那条连接"可用；连接池在并发时会给不同线程不同连接 | Android 没有 API 在 `SQLiteDatabaseConfiguration` 里统一设置 `trusted_schema`；C1 代码里也没有任何地方改它 | 靠 `selfCheck` 第 1/2 条事后发现；若真出现，只能降级为 `APP_SYNC`（`MemorySchema.invalidateFtsCache()` + 重探） |
-| U-13 | 若将来切 WAL，`backupBeforeMigration` 在 `onUpgrade` 内的时机不再安全（WAL 未 checkpoint 的页不在主库） | 修它需要 `open class InboxDatabase` + `override getWritableDatabase/getReadableDatabase`，影响 30+ 构造点，超出 C1-B 的 diff 预算 | 单开一批：前移备份 + `T-M47`（WAL 下备份可恢复）；在那之前 §5.12 的断言会显式拒绝 WAL 迁移，不会静默生成坏备份 |
+| U-12 | 连接级 pragma 是否可能在某条连接上偏离（v4 **已大幅收窄**，但不等于零） | 非 WAL 时连接池只有 **1** 条连接（AOSP `setMaxConnectionPoolSizeLocked`），探测与写入结构性同连接；WAL 下探测直接降级 `APP_SYNC` 且不缓存 | 若第三方显式在唯一连接上执行 `PRAGMA trusted_schema=OFF`，写入会**立刻抛** `SQLiteException`（fail-loud），不是静默漏写；C1 代码 `grep trusted_schema` = 0。发现即 `invalidateFtsCache()` + 重探，必要时长期停用 `TRIGGER` |
+| U-13 | 若将来切 WAL，备份时机与连接池假设同时失效（WAL 未 checkpoint 的页不在主库；池大小变成 >1） | 修它需要 `open class InboxDatabase` + `override getWritableDatabase/getReadableDatabase`，影响 30+ 构造点，超出 C1-B 的 diff 预算 | 单开一批：前移备份 + 逐连接 pragma 校验 + WAL 下备份可恢复测试；在那之前 §5.12 的闸门会在**拷贝之前**显式拒绝 WAL 迁移 |
+| U-16 | 真实旧库的 `sqlite_sequence` 里是否已经有同名重复行，无法凭空断定 | 只有拿到真实库才能查（`SELECT name,COUNT(*) FROM sqlite_sequence GROUP BY name HAVING COUNT(*)>1`） | A-7 核对时一并记录；`alignSequence` 已做"先收敛再断言恰好 1 行"，即使有也能修 |
+| U-17 | `T-S26`–`T-S28` 的故障注入只覆盖"被注入的那一次 DROP"，不能证明磁盘满、ROM 限制等真实失败路径 | 注入点只能模拟异常，不能模拟所有 OS 级失败 | `findResidue` 的前缀扫描是兜底：无论因为什么原因没删掉，残留都会被下一次启动的 `ensureAll` 扫到并强制清理 |
 | U-14 | `SensitiveGuard.redact` 对 SENSITIVE 行的 `excerpt` 不保证 100% 脱敏（正则能力边界） | 不是 C1 引入的问题；C1 只承诺"SECRET 整行不迁入" | 与 C0.2 §14.2 阶段 3 的备份清理同批处理（C3） |
 | U-15 | `T-N01`–`T-N05` 的并发窗口靠 `CountDownLatch` 缩小，不能证明"任意调度下都正确" | 无法穷举线程调度；50 次是工程折中 | 若线上出现，先看 `lastMigrationError` / revision 链是否符合 §7.5.1 |
 
@@ -3633,6 +4267,112 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 
 ---
 
-**本文件到此结束。它是实施方案，不是实施结果。C1-B 尚未开始，生产代码未改动，`DB_VERSION` 仍为 16。**
+## 20. v4 修订记录与交付附录
 
-> v2 的边界：只落实 D-6 / D-7 两项已决事项，未新增任何架构设计，未修改任何生产代码。§19.1 的 checklist 已包含 D-6/D-7 的步骤；开工前请以本文件 + 修订记录为准，C0.2 只在本文未覆盖处作为依据。
+### 20.1 版本与基线
+
+| 项 | 值 |
+|---|---|
+| 文档版本 | **C1-B 实施方案 v4** |
+| 修订日期 | **2026-11-27** |
+| 上一版 | v3（提交 `664b818`，3,638 行，75 条 / 126 次 / 457） |
+| 修订基线 | `BASE_C1B_V3 = 664b818`；v4 的提交哈希在提交后填入 `BASE_IMPL` |
+| 生产代码 | **零改动**（`app/src` 未触碰，`DB_VERSION` 仍为 16） |
+| 架构依据 | C0.2（冻结，不改）；C1-A（事实记录，不改） |
+| 决策依据 | D-6 / D-7（不改，见 §20.3） |
+| 交付形态 | 本文件（完整方案）+ 同名合订文件 `C1B-v4-all-in-one.md`（仓库内新文件，不覆盖 v3） |
+
+### 20.2 P0 / P1 逐项关闭表
+
+> 状态口径：**已修复（文档层）** = 方案已改到"可照着实现、且有验收用例"的程度；**不代表代码已写、测试已跑**。代码要到 C1-B1–B5 才产生。
+
+| 问题编号 | v3 的问题 | v4 修改位置 | 修改内容 | 验证方式 | 状态 |
+|---|---|---|---|---|---|
+| **P0-1** | 迁移只建 `idx_mi_dedupe`，`idx_ms_dedupe` / `idx_mev_primary` 从未创建 | §4.4 S10、§4.5.1、§5.2 第 10 步、**§5.2.1（新增）**、§9.2 第 8 步、§10.2、§10.13.1 | 第 10 步改为"预检三个 → 按 `source→evidence→item` 顺序建三个 → 逐条验证"；预检 SQL 三条；冲突抛 `MigrationConflictException` 并回滚；新建/升级两条路径结构一致 | `T-M47`（存在+定义+唯一性）、`T-M48`（冲突回滚）、`T-M49`（双路径一致）；§5.2.1 的 V1/V2/V3 | **已修复（文档层）** |
+| **P0-2** | 探测先 `return finish(TRIGGER)`、后清理；`lastError` 未声明 | **§6.2 整节重写**、§6.2.1、§10.13.2、§9.3 | 改为 `FtsProbe`：建 → 功能验证 → **清理 → 残留扫描 → 才决定**；清理失败/残留 → `APP_SYNC` 且不缓存；`lastError` 显式声明；`dropInterceptor` 供注入 | `T-S25`（正常）、`T-S26`（DROP TRIGGER 失败）、`T-S27`（DROP TABLE 失败）、`T-S28`（静默残留） | **已修复（文档层）** |
+| **P0-3** | `journal_mode` 检查在备份之后 | §5.1 时序 3/4、§5.2 第 0 步、**§5.12 整节重写**、§8.2、§9.2 第 1 步 | 新增 `MigrationBackup.checkAndBackup`：第一行读 `PRAGMA journal_mode`，不合法**一个字节都不拷**并抛异常；拷贝失败才降级为"记日志继续" | `T-M50`（WAL：不备份/不迁移/库不变）、`T-M51`（delete：备份可打开且 integrity ok） | **已修复（文档层）** |
+| **P1-1** | `INSERT OR REPLACE INTO sqlite_sequence` 依赖不存在的唯一约束 | §5.7 ②③、§5.11、§9.2 第 10 步、§11.4 ⑥、§10.2 | 改为"收敛重复行 → `UPDATE` → `changes()==0` 再 `INSERT` → 断言恰好 1 行 + `seq >= MAX(id)`"；并对 9 张 AUTOINCREMENT 表做重复行体检 | `T-M46`（新 id 递增）、`T-M52`（幂等 + 恰好 1 行）；§5.7 的实测证据（`pragma index_list` 空、两次 REPLACE 后 3 行） | **已修复（文档层）** |
+| **P1-2** | `softDelete` 无条件 `DELETE FROM zhuli_memory_fts` | §6.3（职责表 + `afterWrite`）、§7.3、§7.6 第 2 步、§16 #16 | 所有写路径统一 `afterWrite(id)`：`TRIGGER` 空操作 / `APP_SYNC` 调 `syncFts` / `NONE` 空操作；禁止直接碰 FTS 表 | `T-S21`（不双写）、`T-S22`（6 路径不漏写）、**`T-D50`（三档 softDelete）**；`grep "DELETE FROM zhuli_memory_fts"` = 1（`syncFts` 内） | **已修复（文档层）** |
+| **P1-3** | `expire()` 有写路径、无 API、无事务边界、却进了测试与双跑判据 | §7.2（方案 B 声明）、§7.5.1 第 6 条、§6.3、§7.11、§17 第 13 行、§10.12 `T-S22`、§10.11 | **C1-B 不实现**：从 API/事务表/转换表/测试/双跑判据中移除；`EXPIRED` 只由 `insert` R4a 产生；`EXPIRE` revision 归 C2 | `T-S22` 改为 6 条路径；`grep -rn "fun expire"` = 0；§7.2 的归属表 | **已修复（文档层）** |
+| **P1-4** | K-12 残留"C0.2 §9.6 分批方案"旧规则 | §13.2 K-12 ③、§5.13.1、§14.1、§18.4 | 统一为"允许分批读/处理/写，仍在同一外层事务；**不允许分批提交**；失败整体回滚"；删除"超时即切多事务"的说法 | 全文检索"分批提交"只出现在"禁止/撤销"语境；§5.13.1 的两行对照表 | **已修复（文档层）** |
+| **P1-5** | 缓存只检查触发器数量（`countFtsTriggers == 3`） | §6.4 第 5 道门、**§6.4.1（新增）**、§6.6 #7、K-15 | `verifyFtsTriggers` 核四件事：名称集合、所属表、事件类型、SQL 归一化全等；`ensureAll` 在缓存=TRIGGER 时 `repair`（先删后建） | `T-S29`（数量=3 但少了 `OF` → 失效并修复）、`T-S30`（挂错表 → 失效并修复） | **已修复（文档层）** |
+| **P1-6** | 连接一致性只是"假设第三方不改 pragma" | §6.2.1 ③、§6.2.1 前置条件、§19.3 U-12 | 用 AOSP 池大小规则证明"非 WAL 时只有 1 条连接"；探测与写事务都加 `isWriteAheadLoggingEnabled` 断言；WAL → `APP_SYNC` 且不缓存；残余风险改为 fail-loud | `T-S31`（WAL 降级、关掉后回 TRIGGER）、`T-N06`（8 线程 pragma 一致 + FTS 一致） | **已修复（文档层）** |
+| **P1-7** | `T-S21`–`T-S24` 被算成双跑，虚增 4 次 | **§10.11 整节重写**、§10.1、§16 #10、§20.5 | 定死判据（单跑/双跑/三档）；双跑 48 条、三档 1 条、单跑 41 条；逻辑 90 / 执行 140 / XML 471 | §10.11.1 的按文件表 + Gradle XML 逐文件对账；A-2 判据同步为"48 双跑 + 1 三档" | **已修复（文档层）** |
+
+**结论**：3 项 P0 与 7 项 P1 **全部在文档层关闭**；没有任何一项被"删掉问题描述"的方式掩盖。每一项都留下了可执行的验收用例编号。
+
+### 20.3 D-6 / D-7 保留核对
+
+| 决策 | 要求 | v4 的落实位置 | 是否被 v4 改动 |
+|---|---|---|---|
+| **D-6** | 6 个业务状态 + `UNKNOWN`；未知值**不得** fallback 到 `ACTIVE`；`EXPIRED`/`REJECTED`/`DELETED` 不合并；`MemoryRanker.conflicts` 支持 `ACTIVE + CANDIDATE` | §7.12.1–§7.12.7、`MemoryTypes.kt`、`MemoryRanker.kt`、`MemoryRepo.projectStatus()`；测试 `T-X01`–`T-X12` | **否**（§7.2 只删了 `expire()`，不涉及 `FactStatus`；§7.5.1 第 6 条仍保留 `EXPIRED` 状态与投影） |
+| **D-7** | 拆 `createCoreTablesV15` + `createFactTableV15`；v17 不复活 `zhuli_fact`；旧表只在 `oldVersion<15` 路径创建；新建库不建旧表 | §4.8.1–§4.8.6、§5.2 第 0 步、`InboxDatabase.kt` 三个调用点；测试 `T-M40`–`T-M45` | **否**（v4 只改了 `onUpgrade` 第一行的备份调用，未动拆分逻辑与调用点） |
+
+> 交叉检查：全文 `zhuli_fact` 的出现位置只有 `createFactTableV15`、迁移源表读取、`zhuli_fact_v1` 改名与断言——没有一处新增写入路径。`FactStatus` 的七值定义、`of()` 的 `?: UNKNOWN`、`isCurrent`/`isActionable` 在 v4 中未改一字。
+
+### 20.4 A-1–A-7 核对状态（**全部仍为"待核对"**）
+
+> 这一节是交付报告里最容易被伪造的部分。v4 **没有任何**新增的源码核对结论——本轮只读了 `InboxDatabase.kt` 与 `MemoryTypes.kt` 的少量行号，且这些行号已在 §1 标注。下列 7 项都需要人（或下一个带完整仓库访问权的执行者）实际比对，**没有一项因为文档修订而自动完成**。
+
+| 编号 | 核对对象 | 核对方式 | 通过标准 | 记录位置 | 状态 |
+|---|---|---|---|---|---|
+| **A-1** | §10 各组的 `T-` 编号与 C0.2 §11.2 的 57 条逐条映射 | 打开 C0.2 §11.2 全文，按编号逐条对照 §10.2–§10.8 的断言 | 57 条每条都能在 §10 找到同编号或明确标注"归 C3/C1-A"；无遗漏、无重复 | C1-B1 报告附录 A | **待核对** |
+| **A-2** | 双跑判据 | 逐条看测试是否调 `MemoryStore` 写方法、是否固定 `ftsMode` | 与 §10.11.1 的"双跑 48 条 + 三档 1 条 + 单跑 41 条"完全一致；任一条不一致，90/140/471 三个数字一起改 | C1-B5 报告 §2 | **待核对**（v4 已把判据从"51 条"改为"48 + 1"） |
+| **A-3** | `MemoryRepo` 的 27 个公开成员 | `grep` 出 `MemoryRepo.kt` 的 public 声明，与 §3.2 的表逐条比对 | 27 个签名一个不多、一个不少；返回类型不变 | C1-B4 报告 §1 | **待核对** |
+| **A-4** | 40 列与 C0.2 逐列一致 | 对照 C0.2 的 `CREATE TABLE zhuli_memory_item` 与 `MemorySchema.DDL_ITEM` | 列名、类型、默认值、`NOT NULL` 全部一致；顺序不影响（按名绑定），但列数必须 40 | C1-B1 报告附录 B | **待核对** |
+| **A-5** | 15 个显式索引与 C0.2 DDL 逐字一致 | 对照 C0.2 的 `CREATE [UNIQUE] INDEX` 与 `EXPECTED_INDEXES` | 名称、表、列顺序、`WHERE` 条件全部一致；三个唯一索引必须是 `CREATE UNIQUE INDEX` | C1-B1 报告附录 B | **待核对** |
+| **A-6** | 真实旧库的状态分布 | 在真实 `zhuli_inbox.db` 上跑 `SELECT status, COUNT(*) FROM zhuli_fact GROUP BY status`（含 `NULL` 与空串） | 与 §5.3.1 的映射表对得上；未知状态数 = `T-X08` 的期望值 | C1-B2 报告 §3 | **待核对**（不能靠模型推断） |
+| **A-7** | 9 张 AUTOINCREMENT 表清单 | `grep -n "AUTOINCREMENT" InboxDatabase.kt` 逐行核对表名；再在真实库上 `SELECT name FROM sqlite_master WHERE sql LIKE '%AUTOINCREMENT%'` | 两处结果一致；`sqlite_sequence` 存在；同名重复行数记录在案（U-16） | C1-B2 报告 §3 | **待核对**（不能只凭表名猜） |
+
+> **A 类未完成之前，不允许启动 C1-B1**（§20.7 的硬门槛）。
+
+### 20.5 测试数量与计算依据
+
+| 口径 | 值 | 计算 |
+|---|---|---|
+| 逻辑用例（C1-B 新增） | **90** | 47（C0.2 架构）+ 12（D-6）+ 6（D-7）+ 25（实现级） |
+| 实现级 25 的明细 | 25 | `T-M46`–`T-M52` 7 + `T-S21`–`T-S31` 11 + `T-D50` 1 + `T-N01`–`T-N06` 6 |
+| 双跑 | **48 条 / 96 次** | B 11 + C 8 + D 7 + E 8 + D-6 的 L2 8 + N 6 |
+| 三档 | **1 条 / 3 次** | `T-D50` |
+| 单跑 | **41 条 / 41 次** | A 20 + D-6 的 L1 4 + D-7 6 + S 写入 4 + S 探测 7 |
+| 执行次数 | **140** | 96 + 3 + 41 |
+| XML 目标 | **471** | 331（实测基线）+ 140 |
+
+> 交叉校验：按文件汇总（§10.11.1）为 25 + 57 + 8 + 16 + 14 + 20 = 140；按参数化汇总为 96 + 3 + 41 = 140。两条路必须一致，不一致就说明某条用例的档位归错了。
+>
+> **与 v3 的差异**：v3 的 126 = 51×2 + 24；v4 的 140 = 48×2 + 3 + 41。差值 +14 = 新增 18 次 − 少算的 4 次（`T-S21`–`T-S24`）。
+
+### 20.6 未解决问题与风险
+
+| 类 | 内容 | 是否阻塞 C1-B1 |
+|---|---|---|
+| A 类核对 | A-1–A-7 全部"待核对"（§20.4） | **阻塞** |
+| P0/P1 | 文档层全部关闭（§20.2） | 不阻塞（但实现后必须由对应测试证明） |
+| U-1–U-17 | 设备/环境/外部依赖类事实（§19.3） | 不阻塞开工；U-3/U-6/U-13 影响发布前补测 |
+| 代码事实 | v4 只核对了 `InboxDatabase.kt` 的行号与 `MemoryTypes.kt` 的枚举位置；**没有**重新核对 27 个签名、40 列、15 索引的源码实体 | 由 A-3/A-4/A-5 覆盖 |
+
+**没有任何一项被"删除问题"的方式掩盖**：v3 的 U-1–U-15 原样保留，新增 U-16/U-17；K-1–K-14 原样保留，K-15 加强；§20.2 的 10 项都指向具体章节与测试编号。
+
+### 20.7 C1-B1 开工门槛
+
+| # | 门槛 | 当前状态 | 判定 |
+|---|---|---|---|
+| 1 | 3 项 P0 在文档层关闭 | 已关闭（§20.2） | ✅ |
+| 2 | 7 项 P1 在文档层关闭 | 已关闭（§20.2） | ✅ |
+| 3 | D-6 / D-7 未被改动 | 未改动（§20.3） | ✅ |
+| 4 | 文档内部一致性检查通过 | 章节/编号/数字/交叉引用已校验（§20.5 两条路对账） | ✅ |
+| 5 | **A-1–A-7 人工核对完成** | **0/7 完成** | ❌ |
+| 6 | 生产代码零改动 | `git status` 仅 `?? Temp/`；`app/src` 无改动 | ✅ |
+
+**结论：不建议开工。** 唯一未满足的是第 5 条：A-1–A-7 需要真实仓库/真实旧库的证据，本轮没有、也不应该凭空补。建议的下一步是：
+
+1. 先做 **A-3 / A-7**（纯 grep，10 分钟可完成）；
+2. 再做 **A-1 / A-4 / A-5**（对照 C0.2 全文，约半天）；
+3. **A-6** 需要真实 `zhuli_inbox.db`（或设备上的库），必须在 C1-B2 之前完成；
+4. 7 项全部记录进 C1-B1 报告后，才把本表第 5 条改为 ✅，再启动 B1。
+
+---
+
+**本文件到此结束。它是实施方案 v4，不是实施结果。C1-B 尚未开始，生产代码未改动，`DB_VERSION` 仍为 16。**
+
+> 边界：v4 只修终审列出的 3 项 P0 + 7 项 P1 与全文一致性，不新增架构设计、不改 D-6/D-7、不动生产代码。开工前请以本文件（含 §20）为准；C0.2 只在本文未覆盖处作为依据。
