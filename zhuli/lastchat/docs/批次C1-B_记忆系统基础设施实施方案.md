@@ -74,6 +74,16 @@
 > | 测试代码预算 | ≤3,500 行 | **≤3,700 行** | 10 条新用例（§8.4） |
 > | 修改生产文件 | 4 | **4**（不变） | v4.2 只改文档 |
 >
+> **修订 v4.2.1（2026-11-27）**：仅修复 v4.2 独立审计发现的 **3 个问题**（快检异常未闭合、缺快检异常测试、文档过时数字），
+> 外加 A-2 旧统计的重新核算；**不重构方案、不改生产代码、不启动 C1-B1**。基于 v4.2（GitHub 提交 `3755f74a`）。
+> v3 / v4 / v4.1 / v4.2 原文件全部保留。逐项见 **§20.10**。
+>
+| 口径 | v4.2 | **v4.2.1（当前）** | 变化原因 |
+|---|---|---|---|
+| **逻辑用例数** | 114 | **115** | +1：`T-S62`（3 个异常子场景仍按 1 条计） |
+| **执行次数** | 164 | **165** | `T-S62` 单跑 1 次 |
+| **目标 XML `tests`** | 495 | **496** | 331 + 165 |
+>
 > v4.1 **修正** v4 的五个结论：① `normalizeTriggerSql` 用 `Regex("(?i)\s+…")`——Kotlin 普通字符串里 `\s` 是**非法转义**，照抄编译不过，改为原始字符串（§6.4.1）；
 > ② `FtsTriggers.repair` 只修结构不修数据——触发器对了、索引仍可能是空的，补 `FtsRebuild`（§6.4.2）；
 > ③ 触发器校验按名字白名单查，**发现不了第四个触发器**，改为按挂载表查全量再比集合（§6.4.1）；
@@ -86,9 +96,9 @@
 
 ### 0.1 一句话
 
-C1-B 用 **7 个新文件 + 4 个改动文件**（生产），把 C0.2 的 7 张表、v16→v17 迁移、三档 FTS 与唯一写入口落地，并用 **114 条新用例（逻辑）/ 164 次执行 + 10 项设备验收**兜住；`MemoryRepo` 的 27 个公开签名一个不改。
+C1-B 用 **7 个新文件 + 4 个改动文件**（生产），把 C0.2 的 7 张表、v16→v17 迁移、三档 FTS 与唯一写入口落地，并用 **115 条新用例（逻辑）/ 165 次执行 + 10 项设备验收**兜住；`MemoryRepo` 的 27 个公开签名一个不改。
 
-> **为什么是两个数**：`114` 是编号数（一条用例一个编号，便于追溯 C0.2 / D-6 / D-7 / v3 / v4 / v4.1 / v4.2）；`164` 是 Gradle 实际执行数（其中 48 条要在 `TRIGGER` 与 `APP_SYNC` 两档各跑一遍，另 1 条在三档各跑一遍；v4.1 的 14 条与 v4.2 的 10 条都固定档位，全部单跑）。v2 曾把逻辑数当执行数（331+65=396），v3 修正为 457，v4 重算为 471，v4.1 到 485，v4.2 再加 10 条单跑后为 495（§10.11 有逐组明细，§20.5 有三口径对照）。
+> **为什么是两个数**：`115` 是编号数（一条用例一个编号，便于追溯 C0.2 / D-6 / D-7 / v3 / v4 / v4.1 / v4.2 / v4.2.1）；`165` 是 Gradle 实际执行数（其中 48 条要在 `TRIGGER` 与 `APP_SYNC` 两档各跑一遍，另 1 条在三档各跑一遍；v4.1 的 14 条与 v4.2 的 10 条都固定档位，全部单跑）。v2 曾把逻辑数当执行数（331+65=396），v3 修正为 457，v4 重算为 471，v4.1 到 485，v4.2 加 10 条单跑后为 495，v4.2.1 再加 1 条单跑（`T-S62`，3 个子场景仍按 1 条计）后为 496（§10.11 有逐组明细，§20.5 有三口径对照）。
 
 > v1 的"7 + 2"是 D-6/D-7 决定前的口径。D-6 要求扩展 `FactStatus`（`MemoryTypes.kt`）并让 `MemoryRanker.conflicts` 支持 CANDIDATE，故生产改动文件由 2 个增至 4 个：`InboxDatabase.kt`（D-7 拆分）、`MemoryRepo.kt`（投影重写）、`MemoryTypes.kt`（状态扩展）、`MemoryRanker.kt`（冲突过滤）。65 = 原 47 + D-6 的 12 + D-7 的 6。
 
@@ -294,7 +304,7 @@ vectorCount / enqueueAllActive / vectorText / hybridSearch(suspend)
 
 | 口径 | 含义 | 谁在用 |
 |---|---|---|
-| **逻辑用例数** | 一个编号 = 一条用例（`T-M01` 是 1 条，不管它跑几遍） | C0.2 §11.2 的 57、本方案的 114 |
+| **逻辑用例数** | 一个编号 = 一条用例（`T-M01` 是 1 条，不管它跑几遍） | C0.2 §11.2 的 57、本方案的 115 |
 | **执行次数** | 同一编号在两种 `ftsMode` 下各跑一次 = 2 次 | `MemoryStore(db, ftsModeOverride=…)` 的双跑设计 |
 | **XML `tests` 计数** | Gradle 报告 `<testsuite tests="N">` 的 N，**等于执行次数** | §16 退出条件、CI 门禁 |
 
@@ -314,9 +324,10 @@ vectorCount / enqueueAllActive / vectorText / hybridSearch(suspend)
 | `C1B_V4_CASES` | **15**（`T-M47`–`T-M52` / `T-S25`–`T-S31` / `T-D50` / `T-N06`） | 逻辑 |
 | `C1B_V41_CASES` | **14**（`T-S42`–`T-S51` / `T-M53`–`T-M56`） | 逻辑 |
 | `C1B_V42_CASES` | **10**（`T-S52`–`T-S61`） | 逻辑 |
-| **`C1B_LOGICAL_CASES`** | **114** = 47 + 12 + 6 + 10 + 15 + 14 + 10（v4.2） | **逻辑** |
-| **`C1B_EXECUTED`** | **164**（双跑 48 条 = 96 次；单跑 65 条 = 65 次；三档 1 条 = 3 次） | **执行** |
-| **`C1B_TARGET_TESTS`** | ≥ 331 + 164 = **495** | **XML** |
+| `C1B_V421_CASES` | **1**（`T-S62`，3 个子场景仍算 1 条） | 逻辑 |
+| **`C1B_LOGICAL_CASES`** | **115** = 47 + 12 + 6 + 10 + 15 + 14 + 10 + 1（v4.2.1） | **逻辑** |
+| **`C1B_EXECUTED`** | **165**（双跑 48 条 = 96 次；单跑 66 条 = 66 次；三档 1 条 = 3 次） | **执行** |
+| **`C1B_TARGET_TESTS`** | ≥ 331 + 165 = **496** | **XML** |
 
 > **为什么目标从 396 → 457 → 471 → 485**：v2 的 396 = 331 + 65，把"逻辑用例数 65"直接加到了"XML 计数 331"上。v3 修正为 457（331 + 126），但把 `T-S21`–`T-S24` 这 4 条"各自固定一档"的用例也算成了双跑。v4 逐条回看参数化方式：双跑 48 条、单跑 41 条、三档 1 条（3 次），新增执行 140 次。v4.1 新增 14 条全部固定在单一档位（10 条 schema 层、4 条迁移层），各跑 1 次 → 471 + 14 = 485；v4.2 再加 10 条单跑 → 495。这不是范围扩张，是**口径修正**——门禁数字必须等于 Gradle 真实执行数，否则 CI 会显示一个数、实际跑另一个数。
 >
@@ -2663,6 +2674,7 @@ SELECT COUNT(*) FROM zhuli_memory_fts WHERE zhuli_memory_fts MATCH ?; -- DELETED
 | `createFtsTable()` 抛异常 | `AppSync("create_table_failed")` | `markFailed`、清缓存；不继续建触发器 |
 | `inspect()` / `repair()` 抛 SQL 异常 | `AppSync("inspect_failed")` / `AppSync("repair_failed")` | `markFailed`、清缓存；**不重建** |
 | 行数快检不符（marker 可能是 `ok`） | 先 `markPending("count_mismatch")`，再走重建 | **不因历史 `ok` 跳过** |
+| **行数快检本身抛异常**（`tableExists` / `rawQuery` / Cursor 读取或关闭） | **`AppSync("quick_count_failed")`** | `markFailed("quick_count_failed")` + `cache.invalidate()`；**立即返回**，不建表、不修触发器、不重建、不做最终复核；源表只读不删改 |
 | 重建事务内 V1–V5 不过 | `AppSync("rebuild_failed")` | 抛 → `endTransaction` 回滚 → FTS 回到重建前；`markFailed`；**不判 TRIGGER** |
 | 重建抛异常（磁盘满、OOM） | 同上 | 同上 |
 | 连续失败 < 3 次 | `AppSync(...)` | 本次进程降档；下次进程启动再试一次 |
@@ -2695,7 +2707,7 @@ internal class FtsIntegrity(private val prefs: SharedPreferences) {
 }
 ```
 
-**`ensureAll` 的完整顺序（v4.2：结构 + 行数快检 + 数据 + 返回模式）**：
+**`ensureAll` 的完整顺序（v4.2.1：结构 + 行数快检（异常即降级） + 数据 + 返回模式）**：
 
 ```kotlin
 /** v4.2 P1-3：把最终有效模式明确交给调用方，不允许只改 SP 却继续用旧 mode */
@@ -2705,16 +2717,42 @@ internal sealed class FtsEnsureResult(open val mode: FtsMode, open val reason: S
     class None(override val reason: String) : FtsEnsureResult(FtsMode.NONE, reason)
 }
 
-/** v4.2 P1-2：行数快检真跑；它只决定 pending，绝不替代 V1–V5 */
-private fun quickCountMismatch(db: SQLiteDatabase): Boolean {
-    if (!tableExists(db, FTS)) return true
-    val ftsCount = db.rawQuery("SELECT COUNT(*) FROM $FTS", null).use {
-        if (it.moveToFirst()) it.getInt(0) else -1
+/** v4.2.1 P1-1：快检的三种结局，异常不再向上抛 */
+private sealed class QuickCount {
+    /** mismatch=true 表示数量不一致，按原流程 markPending 后重建 */
+    class Result(val mismatch: Boolean) : QuickCount()
+    /** tableExists / rawQuery / Cursor 读取或关闭任一异常都归到这里 */
+    object Failed : QuickCount()
+}
+
+/**
+ * v4.2.1 P1-1：把 `tableExists`、两次 `rawQuery`、Cursor 读取与 `use` 关闭
+ * **全部**包进 try/catch。任何异常都返回 `Failed`，绝不吞掉后伪装成"数量一致"。
+ * 本函数只读源表，不写、不删任何业务数据。
+ *
+ * 测试注入点：`quickCountFault` 在三个真实调用点之前被调用，钩子**抛出真实的
+ * `SQLiteException`**，让异常沿正常调用栈穿过 try/catch；不是"mock 直接返回 Failed"。
+ * 生产构建里它为 null，零行为影响。
+ */
+@VisibleForTesting internal var quickCountFault: ((String) -> Unit)? = null
+private fun safeQuickCount(db: SQLiteDatabase): QuickCount = try {
+    quickCountFault?.invoke("table_exists")
+    if (!tableExists(db, FTS)) {
+        QuickCount.Result(true)          // 表不存在本就由第①步处理；按"不一致"继续降级路径
+    } else {
+        quickCountFault?.invoke("fts_count")
+        val ftsCount = db.rawQuery("SELECT COUNT(*) FROM $FTS", null).use {
+            if (it.moveToFirst()) it.getInt(0) else -1
+        }
+        quickCountFault?.invoke("src_count")
+        val srcCount = db.rawQuery(
+            "SELECT COUNT(*) FROM $TABLE WHERE status <> 'DELETED'", null
+        ).use { if (it.moveToFirst()) it.getInt(0) else -1 }
+        QuickCount.Result(ftsCount != srcCount)
     }
-    val srcCount = db.rawQuery(
-        "SELECT COUNT(*) FROM $TABLE WHERE status <> 'DELETED'", null
-    ).use { if (it.moveToFirst()) it.getInt(0) else -1 }
-    return ftsCount != srcCount
+} catch (t: Throwable) {
+    Log.w(TAG, "FTS 行数快检异常：${t.javaClass.simpleName}: ${t.message?.take(80)}")
+    QuickCount.Failed
 }
 
 internal fun ensureAll(                 // 必须 internal：返回类型是 internal 的 FtsEnsureResult
@@ -2760,8 +2798,15 @@ internal fun ensureAll(                 // 必须 internal：返回类型是 int
         TriggerState.Ok -> Unit
     }
 
-    // ③ 行数快检：即使 marker=ok 也执行——历史 ok 不能跳过损坏检查
-    if (quickCountMismatch(db)) integrity.markPending("count_mismatch")
+    // ③ 行数快检：即使 marker=ok 也执行；异常直接降级，不进入任何后续 FTS 流程
+    when (val qc = safeQuickCount(db)) {
+        is QuickCount.Result -> if (qc.mismatch) integrity.markPending("count_mismatch")
+        QuickCount.Failed -> {
+            integrity.markFailed("quick_count_failed")   // markFailed 会递增失败计数，沿用 3 次阈值
+            cache.invalidate()
+            return FtsEnsureResult.AppSync("quick_count_failed")
+        }
+    }
 
     // ④ 全量重建（V1–V5 在 FtsRebuild 的事务内执行）
     if (!integrity.isOk()) {
@@ -2779,14 +2824,17 @@ internal fun ensureAll(                 // 必须 internal：返回类型是 int
         cache.invalidate()            // 结构/数据修过后强制重探
     }
 
-    // ⑤ 最终复核：结构 + 行数；不过就降级，绝不返回 TRIGGER
-    val finalOk = try {
-        FtsTriggers.inspect(db) == TriggerState.Ok && !quickCountMismatch(db)
-    } catch (t: Throwable) { false }
+    // ⑤ 最终复核：结构 + 行数；这里的快检也走 safeQuickCount，异常同样降级
+    val finalState = try { FtsTriggers.inspect(db) } catch (t: Throwable) { null }
+    val finalCount = safeQuickCount(db)
+    val finalOk = finalState == TriggerState.Ok &&
+        finalCount is QuickCount.Result && !finalCount.mismatch
     if (!finalOk) {
-        integrity.markFailed("final_verify_failed")
+        // 快检异常用专门 reason；不能笼统报 final_verify_failed，否则日志会误导排查
+        val reason = if (finalCount is QuickCount.Failed) "quick_count_failed" else "final_verify_failed"
+        integrity.markFailed(reason)
         cache.invalidate()
-        return FtsEnsureResult.AppSync("final_verify_failed")
+        return FtsEnsureResult.AppSync(reason)
     }
     return FtsEnsureResult.TriggerReady
 }
@@ -2835,6 +2883,26 @@ val store = MemoryStore(db, runtimeFtsMode)  // 必须在上面之后
 | `T-S59` | `FtsRebuild.run` 重建失败 | `AppSync("rebuild_failed")`；FTS 行数与重建前相同；`runtimeFtsMode=APP_SYNC` |
 | `T-S60` | 连续 3 次让重建失败 | 第 3 次后 `failures()==3`，返回 `AppSync("rebuild_failed_3_times")`；**第 4 次不再尝试重建**；任何一次都不返回 `TRIGGER` |
 | `T-S61` | 建外来触发器写 FTS | `None("foreign_trigger_on_fts")`；外来触发器仍在；`runtimeFtsMode=NONE`；缓存写 `NONE` |
+| `T-S62` | 快检异常（3 个子场景 A/B/C） | 返回 `AppSync("quick_count_failed")`；`markFailed` + `invalidate` 均被调用；不重建、不修触发器；无未捕获异常；源表行数与抽检 5 行不变 |
+
+**`T-S62｜quickCountMismatch 异常降级闭环`（v4.2.1 新增，1 条 / 3 个子场景，单跑）**：
+
+| 子场景 | 注入位置（`quickCountFault` 的 tag） | 必断言 |
+|---|---|---|
+| A | `"fts_count"`：`rawQuery("SELECT COUNT(*) FROM zhuli_memory_fts")` 前抛 `SQLiteException` | 返回 `AppSync("quick_count_failed")` |
+| B | `"src_count"`：源表 `rawQuery` 前抛 `SQLiteException` | 同上 |
+| C | `"table_exists"`：`tableExists()` 前抛 `SQLiteException` | 同上 |
+
+每个子场景**共同断言**（缺一不算通过）：
+
+1. `FtsIntegrity.markFailed("quick_count_failed")` 被调用（用记录调用的测试替身，不是只读静态状态）；
+2. `FtsModeCache.invalidate()` 被调用，且 `KEY_MODE` 已移除；
+3. 返回值 `!is TriggerReady`、`.mode == APP_SYNC`、`.reason == "quick_count_failed"`；
+4. `FtsRebuild.run()`、`createFtsTriggers()`、`createFtsTable()` **均未被调用**（用计数器断言），证明异常后没有继续 FTS 修复或重建；
+5. 测试函数本身不抛异常（异常必须被 `safeQuickCount` 捕获）；
+6. `SELECT COUNT(*) FROM zhuli_memory_item` 与抽检的 5 行 `subject/value` 在调用前后**完全相同**——降级不允许删改源表数据。
+
+> **可测试性说明**：当前 `ensureAll` 内部直接调 `tableExists` / `rawQuery`，没有注入缝。按"最小范围调整"原则只加一个包级 `@VisibleForTesting var quickCountFault: ((String) -> Unit)?`，默认 null；三处钩子均在真实调用**之前**调用并抛真实异常，异常沿正常栈穿过 `safeQuickCount` 的 try/catch。**不重构 FTS 模块、不引入 mock 框架**；钩子只在 JVM 单测里设置。
 
 #### 6.4.3 缓存写入顺序
 
@@ -3523,7 +3591,7 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 | # | 路径 | 类型 | 行数（估） | 覆盖（逻辑条数） |
 |---|---|---|---|---|
 | 1 | `app/src/test/java/com/zhuli/memory/MemoryTextTest.kt` | 新增 | 140 | L1 纯函数：`norm` / `searchText` / `queryExpr` / `dedupeKey` / `slotHash`（含 CJK、全角、标点、单字） |
-| 2 | `app/src/test/java/com/zhuli/memory/MemorySchemaTest.kt` | 新增 | **690** | DDL 一致性（40 列 + **15 显式 + 4 自动**索引，§4.5）、建表幂等、`detectFtsMode` 三档 + 缓存六道门（§6.4）、`T-M40`、`T-S25`–`T-S31`（清理失败注入、残留、触发器定义校验、WAL 降级）、**`T-S42`–`T-S51`（触发器集合与 FTS 数据重建，10 条）** |
+| 2 | `app/src/test/java/com/zhuli/memory/MemorySchemaTest.kt` | 新增 | **725** | DDL 一致性（40 列 + **15 显式 + 4 自动**索引，§4.5）、建表幂等、`detectFtsMode` 三档 + 缓存六道门（§6.4）、`T-M40`、`T-S25`–`T-S31`（清理失败注入、残留、触发器定义校验、WAL 降级）、**`T-S42`–`T-S51`（触发器集合与 FTS 数据重建，10 条）** |
 | 3 | `app/src/test/java/com/zhuli/memory/MemoryMigratorTest.kt` | 新增 | **930** | `T-M01`–`T-M10`、`T-M36`–`T-M38`（13）+ `T-M41`–`T-M45`（5）+ `T-M46`（1）+ `T-M47`–`T-M52`（6）+ **`T-M53`–`T-M56`（4，备份失败中止）** = **29** |
 | 4 | `app/src/test/java/com/zhuli/memory/MemoryStoreTest.kt` | 新增 | **920** | `T-S11`–`T-S20`（10）+ `T-S39`（1）+ `T-S21`–`T-S24`（4）+ `T-D31` / `T-D33` / `T-D44`–`T-D49`（8）+ **`T-D50`（1，三档执行）** + `T-N01`–`T-N06`（6）= **30** |
 | 5 | `app/src/test/java/com/zhuli/memory/MemoryTimeQueryTest.kt` | 新增 | 230 | `T-T21`–`T-T24`、`T-T40`–`T-T43`（8） |
@@ -3537,10 +3605,10 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 
 | 口径 | 行数 |
 |---|---|
-| 新增测试代码（不含 fixture） | 140 + 690 + 930 + 920 + 230 + 200 + 300 = **3,410** |
-| 含 fixture | **3,590** |
+| 新增测试代码（不含 fixture） | 140 + 725 + 930 + 920 + 230 + 200 + 300 = **3,445** |
+| 含 fixture | **3,625** |
 | 修改 | 1 个文件（`MemorySqliteTest.kt`，+20/−5） |
-| 逻辑用例合计 | 1（`T-M40`）+ 29 + 30 + 8 + 7 + 12 + 7（`T-S25`–`T-S31`）+ 10（`T-S42`–`T-S51`）+ 10（`T-S52`–`T-S61`）= **114**（5 组纯函数不计编号） |
+| 逻辑用例合计 | 1（`T-M40`）+ 29 + 30 + 8 + 7 + 12 + 7（`T-S25`–`T-S31`）+ 10（`T-S42`–`T-S51`）+ 10（`T-S52`–`T-S61`）+ 1（`T-S62`）= **115**（5 组纯函数不计编号） |
 
 > **v4 的 +290 行从哪来**（相对 v3 的 2,760）：`MemoryMigratorTest` +200（`T-M47`–`T-M52`，含 6 条迁移用例与两个故障库构造）、`MemoryStoreTest` +130（`T-D50` 三档 + `T-N06` 八线程）、`MemorySchemaTest` +100（4 条清理注入 + 2 条触发器定义 + 1 条 WAL 降级）、`MemoryTestFixture` +20（`openWalDatabase`）。
 >
@@ -3548,6 +3616,7 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 >
 > **v4.1 的 +330 行**：`MemorySchemaTest` +180（`T-S42`–`T-S51`）、`MemoryMigratorTest` +150（`T-M53`–`T-M56`）。
 > **v4.2 的 +210 行**：`MemorySchemaTest` +210（`T-S52`–`T-S61`，含 6 个故障注入点）。
+> **v4.2.1 的 +35 行**：`MemorySchemaTest` +35（`T-S62` 的 A/B/C 三个子场景与 6 组共同断言）。
 
 
 ### 8.5 diff 预算核算与自检
@@ -3556,7 +3625,7 @@ fun conflicts(facts: List<Fact>): List<Pair<Fact, Fact>> {
 |---|---|---|---|
 | 生产新增 | ≤1,870（v4.2 调整；v4.1 为 1,800、v4 为 1,650） | 1,825 | 否（余 45） |
 | 生产修改 | **恰好 4 个文件** | 4 个（`InboxDatabase` +38/−12、`MemoryRepo` 485→175、`MemoryTypes` +18/−6、`MemoryRanker` +8/−3） | 否 |
-| 测试新增 | ≤3,700（v4.2 调整；v4.1 为 3,500、v4 为 3,300） | ~3,590（含 fixture） | 否（余 110） |
+| 测试新增 | ≤3,700（v4.2 / v4.2.1 沿用；v4.1 为 3,500） | ~3,625（含 fixture） | 否（余 75） |
 | 测试修改 | — | 1 个文件（`MemorySqliteTest.kt`，+20/−5） | — |
 | 触碰 C0.2 §10.3 禁止清单 | 0，除 D-6 明确放行的 `MemoryTypes.kt` / `MemoryRanker.kt` | 0 | 否 |
 | 数据库版本 | 只 +1 | 16→17 | 否 |
@@ -3653,12 +3722,13 @@ grep -rn 'DROP TRIGGER IF EXISTS $name' app/src/main            # 期望 0（P1-
 
 | 路径 | 动作 |
 |---|---|
-| `docs/批次C1-B_记忆系统基础设施实施方案.md` | **本文**（C1-B 开工前交付；当前版本 **v4.2**） |
+| `docs/批次C1-B_记忆系统基础设施实施方案.md` | **本文**（C1-B 开工前交付；当前版本 **v4.2.1**） |
 | `docs/批次C1-B_方案决策修订记录.md` | v2 新增（D-6/D-7 决策原文、落实映射、差异清单、测试重算） |
 | `docs/批次C1-B_方案v2到v3修订对照表.md` | v3 新增（历史，v4 不改） |
 | `docs/批次C1-B_方案v3到v4修订记录.md` | v4 新增（历史，v4.1 不改） |
 | `docs/批次C1-B_方案v4到v4.1修订记录.md` | v4.1 新增（历史，v4.2 不改；与本文 §20.8 同源） |
-| `docs/批次C1-B_方案v4.1到v4.2修订记录.md` | **v4.2 新增**（4 项定点修复、连带一致性、测试重算；与本文 §20.9 同源） |
+| `docs/批次C1-B_方案v4.1到v4.2修订记录.md` | v4.2 新增（历史，v4.2.1 不改；与本文 §20.9 同源） |
+| `docs/批次C1-B_方案v4.2到v4.2.1修订记录.md` | **v4.2.1 新增**（3 项修复 + A-2 重算；与本文 §20.10 同源） |
 | `docs/批次C1-B_实施与验收报告.md` | C1-B5 产出（不在本轮） |
 
 `docs/批次C0.2_*.md` / `docs/批次C1-A_*.md` **不改**（C0.2 是冻结的架构依据；C1-A 是已完成的事实记录）。D-6 覆盖 C0.2 §10.3 的"`MemoryTypes.kt` 不动"这一条，差异记在修订记录，不回写 C0.2。
@@ -3742,6 +3812,7 @@ grep -rn 'DROP TRIGGER IF EXISTS $name' app/src/main            # 期望 0（P1-
 - **v4.2｜命名空间严格字面匹配**：`namespaceTriggers` 用 `substr(name,1,length(?))=?` 而非 `LIKE`；`repair` 的每条 `DROP` 都经 `quoteIdentifier`；LIKE 假阳性、挂别表、特殊字符名的外来触发器一个都不删（`T-S52`–`T-S55`）；
 - **v4.2｜行数快检真跑**：即使 `FtsIntegrity.isOk()==true`，`ensureAll` 也必须执行 `quickCountMismatch`；先成功重建置 `ok`、再删 1/3 行、再次调用必须发现并重建（`T-S49`，禁止预清 marker）；
 - **v4.2｜返回模式闭合**：`ensureAll` 返回 `FtsEnsureResult`；结构/快检/数据全过才 `TriggerReady`；建表失败、`DROP`/`CREATE` 失败、重建失败 → `AppSync`；外来写 FTS → `None`；连续 3 次失败停重试但不误报 `TRIGGER`；调用方 `runtimeFtsMode` 必须等于返回档位（`T-S56`–`T-S61`）；
+- **v4.2.1｜快检异常闭环**：三个注入点（FTS `rawQuery` / 源表 `rawQuery` / `tableExists`）抛真实异常时，统一返回 `AppSync("quick_count_failed")`，不返回 `TriggerReady`、不再修复或重建、源表数据不变（`T-S62`）；
 
 ### 9.4 C1-B4｜Store / Manager
 
@@ -3768,14 +3839,14 @@ grep -rn 'DROP TRIGGER IF EXISTS $name' app/src/main            # 期望 0（P1-
 - **`conflicts()` 在"1 ACTIVE + 1 CANDIDATE"下返回 1 对**（旧实现返回 0 对，`T-X09`）；
 - **FTS 三档写入职责全绿**（`T-S21`–`T-S24` + `T-D50`）：`TRIGGER` 不双写、`APP_SYNC` **6 条**路径不漏写、`NONE` 仍写 `search_text` 且四约束不丢、`softDelete` 在三档下都不直接碰 FTS；
 - **并发 6 条全绿**（`T-N01`–`T-N06`，每条跑 50 次；`T-N06` 额外断言 8 线程读到的 `trusted_schema`/`journal_mode` 一致）；
-- **B4 结束时的执行计数**：逻辑 114 条 / 执行 164 次（§10.11.3）。
+- **B4 结束时的执行计数**：逻辑 115 条 / 执行 165 次（§10.11.3）。
 
 
 ### 9.5 C1-B5｜回归与验收
 
 | 步 | 动作 | 产物 |
 |---|---|---|
-| 1 | 全量 `:app:testDevDebugUnitTest` | **XML `tests` ≥ 495**（逻辑 114 条 / 执行 164 次，§10.11） |
+| 1 | 全量 `:app:testDevDebugUnitTest` | **XML `tests` ≥ 496**（逻辑 115 条 / 执行 165 次，§10.11） |
 | 2 | `:app:connectedDevDebugAndroidTest` | D1–D4、D6、D7、D9、D10 |
 | 3 | B1 的 12 个验收场景 | D8 |
 | 4 | 飞行模式手测 | D5 |
@@ -3806,11 +3877,11 @@ grep -rn 'DROP TRIGGER IF EXISTS $name' app/src/main            # 期望 0（P1-
 |---|---|---|---|---|
 | L0 能力门槛 | Robolectric + androidTest | `MemoryFtsRobolectricTest` / `MemoryFtsInstrumentedTest`（C1-A 已交付） | 7（已完成） | 18（已完成） |
 | L1 纯函数 | JVM 单测 | `MemoryTextTest` + `MemoryFactStatusTest` 的解析部分 | 5 组 + 4 条（`T-X01`–`T-X03`、`T-X10`） | 同左（不双跑） |
-| L2 真实 SQLite | Robolectric `NATIVE` | `MemoryMigratorTest` / `MemoryStoreTest` / `MemoryTimeQueryTest` / `MemoryScopeTest` / `MemorySchemaTest` / `MemoryFactStatusTest` | **114** | **164** |
+| L2 真实 SQLite | Robolectric `NATIVE` | `MemoryMigratorTest` / `MemoryStoreTest` / `MemoryTimeQueryTest` / `MemoryScopeTest` / `MemorySchemaTest` / `MemoryFactStatusTest` | **115** | **165** |
 | L3 设备 | 模拟器 | `MemoryMigrationTimingTest` + 手工 | D1–D10 | — |
 | L4 回归 | 现有套件 | `MemorySqliteTest` + B1 的 12 场景 | 331（XML 基线） | 331 |
 
-> 114 = 架构用例 47 + D-6 的 12 + D-7 的 6 + 实现级 49（v3 的 10 + v4 的 15 + v4.1 的 14 + v4.2 的 10）。164 的逐组明细见 §10.11.3。
+> 115 = 架构用例 47 + D-6 的 12 + D-7 的 6 + 实现级 50（v3 的 10 + v4 的 15 + v4.1 的 14 + v4.2 的 10 + v4.2.1 的 1）。165 的逐组明细见 §10.11.3。
 >
 > `T-X01`/`T-X02` 是纯函数，但为了"一个决策一个文件"的追溯性，放在 `MemoryFactStatusTest` 里统一维护，不拆到 `MemoryTextTest`。
 
@@ -4019,11 +4090,11 @@ v3 把 `T-S21`–`T-S24` 都当成双跑。实际上这 4 条各自固定一个 
 |---|---|---|---|
 | `MemoryMigratorTest` | 29 | 29 | A 组 24（全单跑）+ D-7 的 5（`T-M41`–`T-M45`，单跑） |
 | `MemoryStoreTest` | 30 | **57** | B 11（双跑 22）+ `T-S21`–`T-S24` 4（单跑 4）+ E 9（8 双跑 16 + `T-D50` 3）+ N 6（双跑 12） |
-| `MemorySchemaTest` | **28** | 28 | `T-M40` 1 + `T-S25`–`T-S31` 7 + `T-S42`–`T-S51` 10 + `T-S52`–`T-S61` 10（全单跑） |
+| `MemorySchemaTest` | **29** | 29 | `T-M40` 1 + `T-S25`–`T-S31` 7 + `T-S42`–`T-S51` 10 + `T-S52`–`T-S61` 10 + `T-S62` 1（3 子场景按 1 条计，全单跑） |
 | `MemoryTimeQueryTest` | 8 | 16 | 8 双跑 |
 | `MemoryScopeTest` | 7 | 14 | 7 双跑 |
 | `MemoryFactStatusTest` | 12 | 20 | 4 条 L1 单跑 + 8 条 L2 双跑 |
-| **合计** | **114** | **164** | 单跑 65 条 / 65 次；双跑 48 条 / 96 次；三档 1 条 / 3 次 |
+| **合计** | **115** | **165** | 单跑 66 条 / 66 次；双跑 48 条 / 96 次；三档 1 条 / 3 次 |
 
 #### 10.11.2 与 C0.2 的编号映射（防止"新增"被重复计入）
 
@@ -4032,10 +4103,10 @@ v3 把 `T-S21`–`T-S24` 都当成双跑。实际上这 4 条各自固定一个 
 | C0.2 架构编号（C1 实现） | **47** | A 13 + B 11 + C 8 + D 7 + E 8 |
 | D-6 | **12** | `T-X01`–`T-X12` |
 | D-7 | **6** | `T-M40`–`T-M45` |
-| 实现级（v3 + v4 + v4.1 + v4.2） | **49** | `T-M46`–`T-M52` 7 + `T-M53`–`T-M56` 4 + `T-S21`–`T-S31` 11 + `T-S42`–`T-S51` 10 + `T-S52`–`T-S61` 10 + `T-D50` 1 + `T-N01`–`T-N06` 6 |
-| **合计** | **114** | — |
+| 实现级（v3 + v4 + v4.1 + v4.2 + v4.2.1） | **50** | `T-M46`–`T-M52` 7 + `T-M53`–`T-M56` 4 + `T-S21`–`T-S31` 11 + `T-S42`–`T-S51` 10 + `T-S52`–`T-S61` 10 + `T-S62` 1 + `T-D50` 1 + `T-N01`–`T-N06` 6 |
+| **合计** | **115** | — |
 
-**全口径 = 124** = 57（C0.2 全部架构用例）+ 67（12 + 6 + 49）。C1-B 实现 **114** = 124 − 7（G 组已在 C1-A）− 3（`T-D32` / `T-A34` / `T-A35` 归 C3）。
+**全口径 = 125** = 57（C0.2 全部架构用例）+ 68（12 + 6 + 50）。C1-B 实现 **115** = 125 − 7（G 组已在 C1-A）− 3（`T-D32` / `T-A34` / `T-A35` 归 C3）。
 
 #### 10.11.3 逐组执行次数（XML 口径）
 
@@ -4054,12 +4125,13 @@ v3 把 `T-S21`–`T-S24` 都当成双跑。实际上这 4 条各自固定一个 
 | S 触发器与重建 10（`T-S42`–`T-S51`） | 10 | 单 | 10 | schema 层：建/删触发器、造残缺索引、注入重建失败；不调写方法 |
 | M 备份 4（`T-M53`–`T-M56`） | 4 | 单 | 4 | 迁移入口之前，与 `ftsMode` 无关 |
 | S 前缀与降级 10（`T-S52`–`T-S61`） | 10 | 单 | 10 | schema 层：LIKE 假阳性、标识符注入、6 类故障注入；不调写方法 |
+| S 快检异常 1（`T-S62`） | 1 | 单 | 1 | 3 个子场景 A/B/C 属同一条用例；不调写方法 |
 | N 并发 6 | 6 | 双 | 12 | 两档都要验 FTS 一致性 |
-| **合计** | **114** | — | **164** | — |
+| **合计** | **115** | — | **165** | — |
 
 ```
-C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 164 = 495
-逻辑 114 条；执行 164 次 = 单跑 65 + 双跑 48×2 + 三档 1×3
+C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 165 = 496
+逻辑 115 条；执行 165 次 = 单跑 66 + 双跑 48×2 + 三档 1×3
 ```
 
 #### 10.11.4 三个数字的关系（防止后面看混）
@@ -4067,14 +4139,14 @@ C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 164 = 495
 | 数字 | 含义 | 谁在用 |
 |---|---|---|
 | `57` | C0.2 §11.2 定义的**架构用例**总数 | C0.2 的验收口径，不变 |
-| `124` | **全口径**（57 + 67 实现级） | 追溯用，不进 XML |
-| `114` | C1-B **新增**逻辑用例 | 逻辑口径的加数 |
-| `164` | C1-B **新增执行次数**（含双跑与三档） | XML 口径的加数 |
-| `495` | **XML 目标**（331 + 164） | §16 退出条件 #2 |
+| `125` | **全口径**（57 + 68 实现级） | 追溯用，不进 XML |
+| `115` | C1-B **新增**逻辑用例 | 逻辑口径的加数 |
+| `165` | C1-B **新增执行次数**（含双跑与三档） | XML 口径的加数 |
+| `496` | **XML 目标**（331 + 165） | §16 退出条件 #2 |
 
 > **v3 的 457 错在哪**：它把 `T-S21`–`T-S24` 这 4 条"各自固定一档"的用例算成双跑，虚增 4 次执行。
 > **v2 的 396 错在哪**：`331 + 65`，把逻辑数加到 XML 数上，导致双跑在门禁里完全不可见。
-> v4 的 140 是**逐条数参数化次数**得到的；v4.1 加 14 条、v4.2 再加 10 条，全部单跑，于是 `114 = 65 + 48 + 1`、`164 = 65 + 96 + 3`、`495 = 331 + 164`。任一处改动都必须让另两处跟着变。
+> v4 的 140 是**逐条数参数化次数**得到的；v4.1 加 14 条、v4.2 再加 10 条，全部单跑，v4.2.1 再加 1 条单跑（`T-S62`），于是 `115 = 66 + 48 + 1`、`165 = 66 + 96 + 3`、`496 = 331 + 165`。任一处改动都必须让另两处跟着变。
 >
 > **A-2 的判据同步更新**：§20.4 的 A-2 从"51 条双跑"改为"48 条双跑 + 1 条三档"，并与 §10.11.1 的按文件表逐条对应。
 
@@ -4228,7 +4300,7 @@ C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 164 = 495
 
 > **P1-2 的验证不新增编号，而是改写 `T-S49`**：先让 `ensureAll()` 成功并把 marker 置 `ok`，**再**删 1/3 的 FTS 行，然后再次调用 `ensureAll()`；必须由行数快检发现并重建成功。**预先清 marker 让测试通过属于假通过，禁止**。
 >
-> 统计：按文件 29 + 57 + 28 + 16 + 14 + 20 = **164**；按参数化 65 + 96 + 3 = **164**。
+> 统计：按文件 29 + 57 + 29 + 16 + 14 + 20 = **165**；按参数化 66 + 96 + 3 = **165**。`T-S62` 的 3 个子场景属于同一条用例，不按 3 条计。
 
 ## 11. 数据迁移预演计划
 
@@ -4283,7 +4355,7 @@ C1-B 结束时预期 XML 计数 = 331（本轮实测基线）+ 164 = 495
 ⑥ sqlite_sequence：`zhuli_memory_item` 同名行**恰好 1 行**且 `seq >= MAX(id)`；9 张 AUTOINCREMENT 表逐张 `GROUP BY name HAVING COUNT(*)>1` 必须 0 行（表不存在则跳过，见 §5.7）
 ⑦ zhuli_fact 不存在 / zhuli_fact_v1 存在
 ⑧ FTS 与源表一致（**不只比行数**，§6.4.2 的 V1–V5 全过）：行数相等、无孤儿、无缺失、无 `DELETED` 残留、`search_text` 逐行相等（TRIGGER 与 APP_SYNC 两档都要满足）
-⑨ `ensureAll()` 的返回模式与运行时一致：返回 `TriggerReady` 时结构+快检+数据都过；返回 `AppSync` / `None` 时调用方 `runtimeFtsMode` 必须同步改档、缓存无 `TRIGGER`（`T-S56`–`T-S61`）
+⑨ `ensureAll()` 的返回模式与运行时一致：返回 `TriggerReady` 时结构+快检+数据都过；返回 `AppSync` / `None` 时调用方 `runtimeFtsMode` 必须同步改档、缓存无 `TRIGGER`（`T-S56`–`T-S61`）；**快检本身抛异常时返回 `AppSync("quick_count_failed")` 且不继续任何 FTS 流程**（`T-S62`）
 ```
 
 ### 11.5 设备耗时测试
@@ -4629,7 +4701,7 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 | **C1-B2** | ① 4 档库账本闭合（6 类终态，`failed=0`）；② 10 组不变量 + 5 条时间断言 + **第 6/6b 条状态断言（含 `NULL`）**；③ `integrity_check=ok`；④ 5 种故障注入全回滚 + 唯一冲突（`T-M48`）+ WAL（`T-M50`）；⑤ 设备 5k ≤3s；⑥ **`T-M41`–`T-M52` 全绿**；⑦ `oldVersion=14/15/16` 三条路径各成功一次；⑧ **三个唯一索引在升级库与新建库中结构一致**（`T-M47`/`T-M49`）；⑨ `sqlite_sequence` 同名行恒为 1（`T-M46`/`T-M52`） | `Temp/c1b/` 日志 + `MemoryMigrationTimingTest` + `MemoryMigratorTest` |
 | **C1-B3** | ① 探测缓存命中（5 次打开只探 1 次）；② **缓存六道门逐条可验**（§6.4）；③ 坏环境（`trusted_schema=OFF`）返回 `APP_SYNC`；④ 三档检索都带全 4 个约束；⑤ `LIKE` 已转义；⑥ `selfCheck` 第 1/2 条能报出人为破坏；⑦ **清理失败三态（DROP TRIGGER / DROP TABLE / 静默残留）全部降级且不缓存 TRIGGER**（`T-S26`–`T-S28`）；⑧ **触发器数量=3 但定义错 → 缓存失效并修复**（`T-S29`/`T-S30`）；⑨ **WAL 下返回 `APP_SYNC` 且关掉 WAL 能回到 `TRIGGER`**（`T-S31`） | `MemorySchemaTest` + 设备日志 |
 | **C1-B4** | ① 27 个签名不变；② 现有 15 例只改 1 处即绿；③ 架构 47 条（双跑 34 条）全绿；④ `T-C57` 通过；⑤ `selfCheck` 干净库返回空；⑥ 六态投影与冲突 12 条全绿；⑦ **FTS 写入职责 4 条 + `T-D50` 三档全绿**；⑧ **并发 6 条（`T-N01`–`T-N06`）全绿**；⑨ `softDelete` 不直接操作 FTS（`grep "DELETE FROM zhuli_memory_fts" MemoryStore.kt` = 1 处，在 `syncFts` 内） | `testDevDebugUnitTest` 报告 |
-| **C1-B5** | ① 全量 **XML ≥ 495** 全绿（逻辑 114 / 执行 164）；② D1–D10 全过；③ §8.5.2 的 24 条命令（1 准备 + 23 自检）全部符合期望值；④ 报告交付 | 报告 + 命令输出 |
+| **C1-B5** | ① 全量 **XML ≥ 496** 全绿（逻辑 115 / 执行 165）；② D1–D10 全过；③ §8.5.2 的 24 条命令（1 准备 + 23 自检）全部符合期望值；④ 报告交付 | 报告 + 命令输出 |
 
 
 ---
@@ -4641,7 +4713,7 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 | # | C0.2 的条件 | 本方案的证据 | 现状 |
 |---|---|---|---|
 | 1 | `ftsMode` 结论给出，G 组 7 条在设备通过 | C1-A 报告 §7.1（`TRIGGER`）+ `MemoryFtsInstrumentedTest` 9/9 | **已完成**（C1-A） |
-| 2 | `testDevDebugUnitTest` 全绿，**XML `tests` ≥ 331 + 164 = 495**（逻辑 114 条，§10.11） | 测试报告 XML 的 `testsuite tests` 属性 | 未执行 |
+| 2 | `testDevDebugUnitTest` 全绿，**XML `tests` ≥ 331 + 165 = 496**（逻辑 115 条，§10.11） | 测试报告 XML 的 `testsuite tests` 属性 | 未执行 |
 | 3 | 无 `@Ignore`、无 `assumeTrue` 跳过 | grep 查 `@Ignore` 与 `assumeTrue` = 0 | 未执行 |
 | 4 | `git diff --name-only BASE_IMPL..HEAD -- app/` ⊆ §8.5.1 的白名单（**21 个文件** = 7 生产新增 + 4 生产修改 + 9 测试新增 + 1 测试修改） | 命令输出逐行比对；`BASE_IMPL` 由 C1-B5 报告第一节填写 | 未执行 |
 | 5 | 真实副本迁移：账本闭合、10 组 + 5 条 + 第 6/6b 条断言全 0、`integrity_check=ok` | `Temp/c1b/` 的 4 份日志 | 未执行 |
@@ -4737,6 +4809,15 @@ v2 写"冷启动总增量 ≤ 300 ms = 上述之和的上界"，但表里 200 + 
 | 命名空间匹配 | `LIKE ?` | **`substr(...)=?` + `quoteIdentifier`** | §6.4.1 |
 | `ensureAll` 返回 | `Unit` | **`FtsEnsureResult`** | §6.4.2 |
 
+**v4.2.1 当前值**（上表只到 v4.2，此后以本表为准）：
+
+| 项 | v4.2（历史） | **v4.2.1（当前）** | 原因 |
+|---|---|---|---|
+| 逻辑 / 执行 / XML | 114 / 164 / 495 | **115 / 165 / 496** | 新增 `T-S62`（单跑 1 次） |
+| 单跑条数 | 65 | **66** | 同上 |
+| 行数快检异常 | 未闭合 | **`AppSync("quick_count_failed")` 明确降级** | §6.4.2 `safeQuickCount` |
+| A-2 判据 | 旧版 90/140/471 残留 | **66+48+1 / 115 / 165 / 496** | §20.4 重新核算 |
+
 ### 18.2 仍然有效的 C0.2 待决（D-1–D-5）
 
 C0.2 §12.1 的 D-1–D-5 与本文不冲突，仍然有效，需要在对应阶段前答复（不阻塞 C1-B1）：SECRET 处置的 UI 表现、旧表（`zhuli_fact_v1`）的删除时机、TASK 记忆的生命周期、物理擦除的触发方式、`AlreadyPresent` 的 UI 文案。
@@ -4810,7 +4891,7 @@ v3 没有推翻任何 D-6 / D-7 的结论，但**撤销了 v2 自己在实现层
 □ B4-5  查询 API（7 个）       □ B4-10 FTS 写入职责（T-S21..S24 + T-D50）
                               □ B4-11 并发 6 条（T-N01..N06）
 
-□ B5-1  全量 XML ≥495（逻辑 114 / 执行 164）
+□ B5-1  全量 XML ≥496（逻辑 115 / 执行 165）
 □ B5-2  D1–D4/D6/D7/D9/D10    □ B5-5  §8.5.2 的 24 条命令全过
 □ B5-3  D8（B1 12 场景）       □ B5-6  C1-B 报告 + §20 的关闭表
 □ B5-4  D5（飞行模式）
@@ -4903,20 +4984,22 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 
 | 项 | 值 |
 |---|---|
-| **文档版本（当前）** | **C1-B 实施方案 v4.2** |
+| **文档版本（当前）** | **C1-B 实施方案 v4.2.1** |
 | 修订日期 | **2026-11-27** |
-| 上一版 | v4.1（本地提交 `eed25cd`；GitHub 提交 `6ea4b0db`，104 条 / 154 次 / 485） |
-| 更早版本 | v4（本地 `926afd2` / GitHub `65425fe9`，90/140/471）；v3（`664b818`，3,638 行，75/126/457） |
-| 修订基线 | v4.1 = `eed25cd`；v4.2 的提交哈希在提交后填入 `BASE_IMPL` |
+| 上一版 | v4.2（本地提交 `57bfbf6`；GitHub 提交 `3755f74a`，114 条 / 164 次 / 495） |
+| 更早版本 | v4.1（`eed25cd` / `6ea4b0db`，104/154/485）；v4（`926afd2` / `65425fe9`，90/140/471）；v3（`664b818`，75/126/457） |
+| 修订基线 | **v4.2 = `3755f74a`**；v4.2.1 的提交哈希在提交后填入 `BASE_IMPL` |
 | 生产代码 | **零改动**（`app/src` 未触碰，`DB_VERSION` 仍为 16） |
 | 架构依据 | C0.2（冻结，不改）；C1-A（事实记录，不改） |
 | 决策依据 | D-6 / D-7（不改，见 §20.3） |
-| 交付形态 | 本文件（完整方案）+ 同名合订文件 `C1B-v4.2-all-in-one.md`（仓库内新文件，不覆盖 v3 / v4 / v4.1） |
-| **当前测试数字** | **114 逻辑 / 164 执行 / 495 XML**（历史数字见 §18.1 与各版修订记录） |
+| 交付形态 | 本文件（完整方案）+ 同名合订文件 `C1B-v4.2.1-all-in-one.md`（仓库内新文件，不覆盖 v3 / v4 / v4.1 / v4.2） |
+| **当前测试数字** | **115 逻辑 / 165 执行 / 496 XML**（历史数字见 §18.1 与各版修订记录） |
+| **文档统计（当前 v4.2.1）** | 源文本文档 **5223 行 / 421,560 字节**（CRLF 行尾）。`wc -l` 口径 = 换行符个数；本文件末尾有换行，因此"文本行数"与换行符个数一致。合订本行数/字节数另计，见合订本文件头 |
+| 历史行数说明 | **5,099 行**是 **v4.2** 的历史统计（对应 v4.2 源文本文档），**不是当前版本行数**；不得再作为 v4.2.1 的口径 |
 
 ### 20.2 P0 / P1 逐项关闭表
 
-> **v4.1 修了 5 项（§20.8），v4.2 修了 4 项（§20.9）。** 本表保留 v4 当时的口径（90 / 140 / 471），不追改为当前数字——它是「v4 修了什么」的历史记录。当前数字见 §20.1 / §20.5。
+> **v4.1 修 5 项（§20.8）、v4.2 修 4 项（§20.9）、v4.2.1 修 3 项（§20.10）。** 本表保留 v4 当时的口径（90 / 140 / 471），不追改为当前数字——它是「v4 修了什么」的历史记录。当前数字见 §20.1 / §20.5。
 >
 > 状态口径：**已修复（文档层）** = 方案已改到"可照着实现、且有验收用例"的程度；**不代表代码已写、测试已跑**。代码要到 C1-B1–B5 才产生。
 
@@ -4951,7 +5034,7 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 | 编号 | 核对对象 | 核对方式 | 通过标准 | 记录位置 | 状态 |
 |---|---|---|---|---|---|
 | **A-1** | §10 各组的 `T-` 编号与 C0.2 §11.2 的 57 条逐条映射 | 打开 C0.2 §11.2 全文，按编号逐条对照 §10.2–§10.8 的断言 | 57 条每条都能在 §10 找到同编号或明确标注"归 C3/C1-A"；无遗漏、无重复 | C1-B1 报告附录 A | **待核对** |
-| **A-2** | 双跑判据 | 逐条看测试是否调 `MemoryStore` 写方法、是否固定 `ftsMode` | 与 §10.11.1 的"双跑 48 条 + 三档 1 条 + 单跑 41 条"完全一致；任一条不一致，90/140/471 三个数字一起改 | C1-B5 报告 §2 | **待核对**（v4 已把判据从"51 条"改为"48 + 1"） |
+| **A-2** | 用例分类与三口径统计的一致性 | 逐条看测试是否调 `MemoryStore` 写方法、是否固定 `ftsMode`；再按 §10.11.1 的按文件表与 §10.11.3 的逐组表**两条独立路径**对账 | ① 分类与 §10.11.1 一致：**单跑 66 条 / 双跑 48 条 / 三档 1 条**；② 逻辑总数 **115** = 66+48+1；③ 执行 **165** = 66×1 + 48×2 + 1×3；④ XML 目标 **496** = 331 实测基线 + 165。按文件 29+57+29+16+14+20 = 165 必须等于按参数化 66+96+3 = 165。**任一统计不一致时必须重算全部关联数字**（§10.11.1/10.11.2/10.11.3/10.11.4/§15/§16/§20.5 一起改），禁止只改其中一个 | C1-B5 报告 §2 | **待核对**（v4.2.1 已把旧口径 48+1+41 / 90/140/471 更新为 66+48+1 / 115/165/496；`T-S62` 的 3 个子场景按 1 条计） |
 | **A-3** | `MemoryRepo` 的 27 个公开成员 | `grep` 出 `MemoryRepo.kt` 的 public 声明，与 §3.2 的表逐条比对 | 27 个签名一个不多、一个不少；返回类型不变 | C1-B4 报告 §1 | **待核对** |
 | **A-4** | 40 列与 C0.2 逐列一致 | 对照 C0.2 的 `CREATE TABLE zhuli_memory_item` 与 `MemorySchema.DDL_ITEM` | 列名、类型、默认值、`NOT NULL` 全部一致；顺序不影响（按名绑定），但列数必须 40 | C1-B1 报告附录 B | **待核对** |
 | **A-5** | 15 个显式索引与 C0.2 DDL 逐字一致 | 对照 C0.2 的 `CREATE [UNIQUE] INDEX` 与 `EXPECTED_INDEXES` | 名称、表、列顺序、`WHERE` 条件全部一致；三个唯一索引必须是 `CREATE UNIQUE INDEX` | C1-B1 报告附录 B | **待核对** |
@@ -4964,17 +5047,17 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 
 | 口径 | 值 | 计算 |
 |---|---|---|
-| 逻辑用例（C1-B 新增） | **114** | 47（C0.2 架构）+ 12（D-6）+ 6（D-7）+ 49（实现级） |
-| 实现级 49 的明细 | 49 | `T-M46`–`T-M52` 7 + `T-M53`–`T-M56` 4 + `T-S21`–`T-S31` 11 + `T-S42`–`T-S51` 10 + `T-S52`–`T-S61` 10 + `T-D50` 1 + `T-N01`–`T-N06` 6 |
+| 逻辑用例（C1-B 新增） | **115** | 47 + 12 + 6 + 50（实现级） |
+| 实现级 50 的明细 | 50 | `T-M46`–`T-M52` 7 + `T-M53`–`T-M56` 4 + `T-S21`–`T-S31` 11 + `T-S42`–`T-S51` 10 + `T-S52`–`T-S61` 10 + `T-S62` 1 + `T-D50` 1 + `T-N01`–`T-N06` 6 |
 | 双跑 | **48 条 / 96 次** | B 11 + C 8 + D 7 + E 8 + D-6 的 L2 8 + N 6 |
 | 三档 | **1 条 / 3 次** | `T-D50` |
-| 单跑 | **65 条 / 65 次** | A 20 + M 备份 4 + D-6 的 L1 4 + D-7 6 + S 写入 4 + S 探测 7 + S 触发器/重建 10 + S 前缀/降级 10 |
-| 执行次数 | **164** | 96 + 3 + 65 |
-| XML 目标 | **495** | 331（实测基线）+ 164 |
+| 单跑 | **66 条 / 66 次** | A 20 + M 备份 4 + D-6 的 L1 4 + D-7 6 + S 写入 4 + S 探测 7 + S 触发器/重建 10 + S 前缀/降级 10 + S 快检异常 1 |
+| 执行次数 | **165** | 96 + 3 + 66 |
+| XML 目标 | **496** | 331（实测基线）+ 165 |
 
-> 交叉校验：按文件汇总（§10.11.1）为 29 + 57 + 28 + 16 + 14 + 20 = 164；按参数化汇总为 96 + 3 + 65 = 164。两条路必须一致，不一致就说明某条用例的档位归错了。
+> 交叉校验：按文件汇总（§10.11.1）为 29 + 57 + 29 + 16 + 14 + 20 = 165；按参数化汇总为 96 + 3 + 66 = 165。两条路必须一致，不一致就说明某条用例的档位归错了。
 >
-> **四代差异**：v3 的 126 = 51×2 + 24；v4 的 140 = 48×2 + 3 + 41；v4.1 的 154 = 140 + 14；v4.2 的 164 = 154 + 10（10 条新用例全部单跑）。
+> **五代差异**：v3 126、v4 140、v4.1 154（+14）、v4.2 164（+10）、v4.2.1 **165（+1，`T-S62`）**；全部新增用例均为单跑。
 
 ### 20.6 未解决问题与风险
 
@@ -4996,6 +5079,7 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 | 2 | v4 的 7 项 P1 在文档层关闭 | 已关闭（§20.2） | ✅ |
 | 3 | v4.1 的 5 项定点问题关闭 | 已关闭（§20.8） | ✅ |
 | 3b | **v4.2 的 4 项定点问题关闭** | 已关闭（§20.9） | ✅ |
+| 3c | **v4.2.1 的 3 项定点问题关闭 + A-2 重算** | 已关闭（§20.10） | ✅ |
 | 4 | D-6 / D-7 未被改动 | 未改动（§20.3） | ✅ |
 | 5 | 文档内部一致性检查通过 | 章节/编号/数字/交叉引用已校验（§20.5 两条路对账） | ✅ |
 | 6 | **A-1–A-7 人工核对完成** | **0/7 完成** | ❌ |
@@ -5092,8 +5176,48 @@ grep -n "quarantined" app/src/main/java/com/zhuli/memory/MemoryMigrator.kt
 
 **A-1–A-7 仍为 0/7**，v4.2 没有新增任何源码或真实数据库核对结论；新增的 10 条只是测试计划。§20.7 的结论不变：**不建议开工 C1-B1**。
 
+
+### 20.10 v4.2.1 定点修订记录（3 个问题 + A-2 重算）
+
+> 状态口径同 §20.2：**已修复（文档层）** = 方案已改到可照着实现、且有验收用例的程度；**不代表代码已写、测试已跑**。
+
+| 问题编号 | v4.2 问题 | v4.2.1 修改位置 | 修改内容 | 验证方式 | 状态 |
+|---|---|---|---|---|---|
+| **P1-1** | `ensureAll()` 第③步直接调 `quickCountMismatch(db)`；`tableExists` / 两次 `rawQuery` / Cursor 读取与关闭的异常未被捕获，会向上抛并中断数据库初始化 | **§6.4.2**（`QuickCount` 三态、`safeQuickCount`、第③步 `when`、第⑤步最终复核）；失败路径表；§9.3 完成条件；§11.4 ⑨ | 新增 `QuickCount{Result(mismatch), Failed}`，把整个快检包进 try/catch；异常 → `markFailed("quick_count_failed")` + `cache.invalidate()` + **立即返回** `AppSync("quick_count_failed")`；不再建表、不修触发器、不重建、不做最终复核；第⑤步的快检也走同一安全函数并用同一 reason。保持 `internal fun ensureAll` 的可见性、返回类型与公开 API 不变；`markFailed` 沿用既有 3 次阈值，不新增重试路径；快检只读源表，不删改数据 | `T-S62` 三个子场景；失败路径表新增专行；`ensureAll` 代码为**完整函数**（非片段） | **已修复（文档层）** |
+| **P1-2** | 没有任何快检异常的降级测试 | **§6.4.2** 的 `T-S62` 详细表；**§10.15** 用例表；§9.3 完成条件；§11.4 ⑨ | 新增 `T-S62`（A: FTS 表 `rawQuery`；B: 源表 `rawQuery`；C: `tableExists`），每条都断言 `AppSync("quick_count_failed")`、`markFailed` 与 `invalidate` 被调用、无 `TriggerReady`、不重建不修复、无未捕获异常、源表行数与抽检 5 行不变。最小可测试性调整：仅新增一个包级 `@VisibleForTesting var quickCountFault: ((String) -> Unit)?`，钩子在三个**真实调用点之前**抛真实 `SQLiteException`，生产构建为 null | §6.4.2 明确写"不是 mock 直接返回 Failed"；§10.15 与 §8.3 均计入统计 | **已修复（文档层）** |
+| **P1-3** | 文档头/合订本仍以 v4.2 的 **5,099 行**当作当前行数；测试统计 114/164/495 未随 `T-S62` 更新 | 文件头、§0.1、§1.5、§8.1/8.3/8.5/8.6、§10.1/10.11/10.15、§11.4、§15/§16、§18.1、§19.1、§20.1/20.2/20.5/20.7、全文尾部 | 当前版本统一 v4.2.1；5,099 明确标为 **v4.2 的历史统计**；新增单独的"文档统计口径"块，区分源文本文本行数、末尾换行口径与字节数；测试重算为 **115 / 165 / 496**（`T-S62` 单跑 +1），单跑 65→66 | 结构校验（围栏、标题、表格列）；两条对账路径 29+57+29+16+14+20 = 165 与 66+96+3 = 165 | **已修复（文档层）** |
+| **P1-4** | §20.4 A-2 仍写"双跑 48 + 三档 1 + 单跑 41 / 90/140/471"，与当前 §10.11 分类不符 | **§20.4 A-2** 整行重写 | 重新按 §10.11.1 分类而不是机械替换：单跑 **66**、双跑 **48**、三档 **1**；校验 `115 = 66+48+1`、`165 = 66×1 + 48×2 + 1×3`、`496 = 331 + 165`，以及按文件 165 = 按参数化 165；明确"任一处不一致必须重算全部关联数字，不能只改一个" | §10.11.1/10.11.2/10.11.3/10.11.4/§15/§16/§20.5 全部同步；A-2 仍保持 **待核对** | **已修复（文档层）** |
+
+**连带一致性（逐项核对过）**：
+
+| # | 位置 | 同步内容 |
+|---|---|---|
+| 1 | 文件头 | 新增 v4.2.1 块；v4.2 数字表标为历史 |
+| 2 | §0.1 / §1.5 | 115 / 165 / 496；新增 `C1B_V421_CASES`；单跑 66 |
+| 3 | §3.4 / §5.12 / §7 / §12 |  migrate / WAL / 备份 / Store 写入口本轮**未改**（保持 v4.2） |
+| 4 | §6.4.1 | 触发器字面前缀与 `quoteIdentifier` 本轮**未改** |
+| 5 | §6.4.2 | `safeQuickCount` + `ensureAll` 第③/⑤步 + 失败路径 + T-S62 详细断言 |
+| 6 | §8.3 / §8.5 | `MemorySchemaTest` 690→725；测试 3,625（含 fixture）；生产预算不变 |
+| 7 | §9.3 / §11.4 | 完成条件补快检异常闭环与返回模式断言 |
+| 8 | §10.1 / §10.11 / §10.15 | 计数重算 + `T-S62` 进入用例表 |
+| 9 | §15 / §16 / §19.1 | 496 / 115 / 165 |
+| 10 | §18.1 / §20.1 / §20.4 / §20.5 / §20.7 | 沿革加 v4.2.1 当前值；版本与门槛；A-2 重算 |
+| 11 | 全文尾部 | v4.2.1 版本与边界 |
+
+#### 附录 C：v4.2.1 快检异常路径的实际编译与运行验证
+
+| 项 | 内容 |
+|---|---|
+| 编译器 | 同 §20.8 / §20.9：`kotlin-compiler-embeddable 2.0.21` + JBR 21 |
+| 被测代码 | `QuickCount` 三态、`safeQuickCount`（含 3 个钩子）、`ensureAll` 第③/⑤步（原文），Android 类型用最小 stub |
+| 结果 | **编译通过**；运行 `V4.2.1 CHECKS PASSED` |
+| 覆盖 | 分别在 `"fts_count"`、`"src_count"`、`"table_exists"` 三个 tag 上抛真实 `IllegalStateException`，三次均返回 `AppSync("quick_count_failed")`；钩子清空后仍返回 `TriggerReady`，证明正常路径未被破坏 |
+| 未覆盖 | 文档其余 Kotlin 片段仍为示意代码，未逐个编译；由 C1-B1–B5 的真实编译保证 |
+
+**A-1–A-7 仍为 0/7**。v4.2.1 没有新增任何源码签名核对或真实数据库核对结论；`T-S62` 只是测试计划。§20.7 的结论不变：**不建议开工 C1-B1**。
+
 ---
 
-**本文件到此结束。它是实施方案 v4.2，不是实施结果。C1-B 尚未开始，生产代码未改动，`DB_VERSION` 仍为 16。**
+**本文件到此结束。它是实施方案 v4.2.1，不是实施结果。C1-B 尚未开始，生产代码未改动，`DB_VERSION` 仍为 16。**
 
-> 边界：v4 修 3 P0 + 7 P1，v4.1 修 5 项，v4.2 修本节列出的 4 项 P1；三轮合计只改文档，不新增架构设计、不改 D-6/D-7、不动生产代码。开工前请以**本文件（v4.2，含 §20）**为准；C0.2 只在本文未覆盖处作为依据。
+> 边界：v4 修 3 P0 + 7 P1，v4.1 修 5 项，v4.2 修 4 项 P1，v4.2.1 修 3 项（快检异常 / 测试 / 过时数字）；四轮合计只改文档，不新增架构设计、不改 D-6/D-7、不动生产代码。开工前请以**本文件（v4.2.1，含 §20）**为准；C0.2 只在本文未覆盖处作为依据。
