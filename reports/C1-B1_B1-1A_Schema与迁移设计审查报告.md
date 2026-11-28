@@ -1,5 +1,11 @@
 # C1-B1 / B1-1A　Schema 与数据库迁移设计审查报告
 
+> **【已被修订】本报告是 B1-1A 第一轮。三处结论已在第二轮被修正，请以
+> `C1-B1_B1-1A_第二轮裁定与勘误报告.md` 为准：**
+> - §5.4 的 B-2 推荐"方案 A（`USER → ref_table=''`）"会丢掉 `save_memory` 的真实 inbox 引用，第二轮改为 **A′**；
+> - §8 的 B-3 规则 `valid_to ?: updated_at` 漏了 DELETED 分支，第二轮改为**按状态分支 + `migrationNow` 兜底**；
+> - §7 的 D-8 算术"57−3=54 / 剩余 47"口径不完整，第二轮重算为 **47 + 18 + 50 = 115**。
+>
 > 阶段：C1-B1 / B1-1A（只读审查、设计核对、迁移方案输出）
 > 时间：2026-11-28
 > 范围声明：**未修改任何生产 Kotlin 代码、未修改 `InboxDatabase.kt` / `MemoryRepo.kt`、未新建 `MemorySchema.kt` / `MemoryMigrator.kt`、未改 `DB_VERSION`、未改 Gradle、未增删测试、未执行任何迁移、未改动真实 v16 副本、未执行任何 Git 写操作。**
